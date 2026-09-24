@@ -60,6 +60,12 @@
         {% if field.required %}required{% endif %}
       >
 
+    {% elif field.widget == 'password' %}
+      <input type="password" name="{{ input_name }}" value="" autocomplete="new-password" {% if field.required %}required{% endif %}>
+
+    {% elif field.widget == 'secret-textarea' %}
+      <textarea name="{{ input_name }}" rows="{{ (spec.get('x-ui') or {}).get('rows', 5) }}" autocomplete="off" spellcheck="false" {% if field.required %}required{% endif %}></textarea>
+
     {% elif field.widget == 'textarea' %}
       <textarea
         name="{{ input_name }}"
@@ -139,7 +145,7 @@
         </div>
       </fieldset>
 
-      <div class="callout">Submitting creates an immutable snapshot of these selected values for approval. No Foreman API job is started until an authorised approver accepts it.</div>
+      <div class="callout">Submitting creates an immutable snapshot of ordinary values for approval. Sensitive fields are stored in Vault and only their references are retained. No Foreman API job is started until an authorised approver accepts it.</div>
       <button class="button primary">Submit for approval</button>
     </form>
   </section>

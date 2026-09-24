@@ -20,7 +20,14 @@ SUPPORTED_WIDGETS = {
     "number",
     "date",
     "datetime-local",
+    "password",
+    "secret-textarea",
 }
+
+
+def sensitive_fields(chiklet):
+    return {name for name, spec in chiklet["form_schema"].get("properties", {}).items()
+            if spec.get("x-sensitive") is True}
 
 
 @lru_cache(maxsize=256)
@@ -77,11 +84,11 @@ def _validate_definition(data, source=""):
         raise ChikletError(f"{source}: form_schema.properties must be an object")
 
     for field_name, spec in properties.items():
-        if spec.get("format") in {"password", "secret"} or spec.get("x-sensitive") is True:
-            raise ChikletError(
-                f"{source}: raw secret field {field_name!r} is not permitted; "
-                "use a secret reference resolved by Foreman/Vault instead"
-            )
+        if spec.get("format") in {"password", "secret"} and spec.get("x-sensitive") is not True:
+            raise ChikletError(f"{source}: {field_name!r} must set x-sensitive: true")
+        if spec.get("x-sensitive") is True:
+            if spec.get("type") != "string" or spec.get("readOnly") or "default" in spec or "enum" in spec:
+                raise ChikletError(f"{source}: sensitive field {field_name!r} must be an editable string without default or enum")
         ui = spec.get("x-ui") or {}
         if not isinstance(ui, dict):
             raise ChikletError(f"{source}: {field_name}.x-ui must be an object")
@@ -91,6 +98,10 @@ def _validate_definition(data, source=""):
                 f"{source}: {field_name}.x-ui.widget {widget!r} is unsupported; "
                 f"use one of {', '.join(sorted(SUPPORTED_WIDGETS))}"
             )
+        if spec.get("x-sensitive") is True and widget not in (None, "password", "secret-textarea"):
+            raise ChikletError(f"{source}: sensitive field {field_name!r} requires a password or secret-textarea widget")
+        if spec.get("x-sensitive") is not True and widget in {"password", "secret-textarea"}:
+            raise ChikletError(f"{source}: {field_name!r} must set x-sensitive: true")
         if "order" in ui and not isinstance(ui["order"], (int, float)):
             raise ChikletError(f"{source}: {field_name}.x-ui.order must be numeric")
         if ui.get("width", "full") not in {"full", "half"}:
@@ -116,6 +127,9 @@ def _validate_definition(data, source=""):
             f"{source}: foreman.input_map references fields not present in form_schema.properties: "
             f"{', '.join(unknown_sources)}"
         )
+    unmapped_secrets = sensitive_fields(data) - set(input_map.values())
+    if unmapped_secrets:
+        raise ChikletError(f"{source}: sensitive fields must be mapped to Foreman: {', '.join(sorted(unmapped_secrets))}")
 
 
 def list_chiklets():
@@ -161,6 +175,8 @@ def _infer_widget(spec):
     ui = spec.get("x-ui") or {}
     if ui.get("widget"):
         return ui["widget"]
+    if spec.get("x-sensitive") is True:
+        return "secret-textarea" if spec.get("format") in {"multiline", "textarea"} else "password"
     if spec.get("enum") is not None:
         return "select"
     if spec.get("type") == "boolean":
@@ -201,7 +217,7 @@ def build_form_layout(chiklet, values=None):
     for index, (name, spec) in enumerate(schema.get("properties", {}).items()):
         ui = spec.get("x-ui") or {}
         group_name = ui.get("group") or "Configuration"
-        current = values[name] if name in values else spec.get("default")
+        current = None if spec.get("x-sensitive") is True else (values[name] if name in values else spec.get("default"))
         field = {
             "name": name,
             "spec": spec,
@@ -261,5 +277,9 @@ def validate_form(chiklet, form):
             errors.append(f"{spec.get('title', prop)} has an invalid value")
 
     for error in sorted(Draft202012Validator(schema).iter_errors(data), key=lambda x: list(x.path)):
-        errors.append(f"{'.'.join(map(str, error.path)) or 'Form'}: {error.message}")
+        field = next(iter(error.path), None)
+        if field in sensitive_fields(chiklet) or not error.path:
+            errors.append(f"{field or 'Form'}: invalid sensitive value")
+        else:
+            errors.append(f"{'.'.join(map(str, error.path)) or 'Form'}: {error.message}")
     return data, errors

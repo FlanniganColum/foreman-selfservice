@@ -32,6 +32,7 @@ def create_app(config_object=Config):
         except Exception: return {"status":"not-ready"},503
     @app.after_request
     def security_headers(resp):
+        resp.headers.setdefault("Cache-Control", "no-store")
         resp.headers.setdefault("X-Content-Type-Options","nosniff"); resp.headers.setdefault("X-Frame-Options","DENY"); resp.headers.setdefault("Referrer-Policy","strict-origin-when-cross-origin"); resp.headers.setdefault("Permissions-Policy","camera=(), microphone=(), geolocation=()"); resp.headers.setdefault("Content-Security-Policy","default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'"); return resp
     @app.errorhandler(403)
     def forbidden(e): return render_template("errors/403.html"),403
