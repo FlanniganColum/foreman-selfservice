@@ -1,0 +1,515 @@
+diff --git a/.env.example b/.env.example
+index 4de435f..a0e909c 100644
+--- a/.env.example
++++ b/.env.example
+@@ -37,6 +37,8 @@ FOREMAN_VERIFY_TLS=true
+ FOREMAN_TIMEOUT_SECONDS=30
+ # Background Foreman status reconciliation interval. Minimum: 2 seconds.
+ FOREMAN_RECONCILE_INTERVAL_SECONDS=5
++# Validate each Chiklet input_map against the live Foreman template before accepting a request.
++FOREMAN_PREFLIGHT_INPUTS_ON_SUBMIT=true
+ FOREMAN_MOCK=true
+ BOOTSTRAP_ADMIN_USERNAME=portal-admin
+ BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-strong-unique-password
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ca3ce12..78276c6 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,15 @@
+ # Changelog
+ 
++## 1.0.6
++
++- Added live Foreman job-template input-contract validation using `/api/templates/:id/template_inputs`.
++- Schema defaults are defensively re-applied when mapped form values are missing or blank, preventing empty Foreman inputs from overriding meaningful Chiklet/Ansible defaults.
++- Requests are pre-flighted against the live Foreman template before entering approval by default (`FOREMAN_PREFLIGHT_INPUTS_ON_SUBMIT=true`).
++- Workers repeat the input-contract check immediately before job creation so template changes after approval fail closed without launching Ansible.
++- Mapped Foreman input names that do not exist on the template are rejected with a clear configuration error.
++- Unmapped Foreman inputs with blank/required defaults are rejected unless explicitly acknowledged with `foreman.allow_unmapped_inputs`.
++- Deterministic input-contract errors no longer consume Celery retries and are audited as `FOREMAN_INPUT_CONTRACT_FAILED`.
++
+ ## 1.0.5
+ 
+ - Made the Chiklet JSON Schema the authoritative source for end-user deployment customisation.
+diff --git a/README.md b/README.md
+index d123a84..00b9ed0 100644
+--- a/README.md
++++ b/README.md
+@@ -45,6 +45,8 @@ Use LDAPS in production. Configure the LDAP URI, base DN, bind/search identity a
+ ## Foreman
+ Set `FOREMAN_MOCK=false`, configure `FOREMAN_URL`, and use a least-privilege API identity. For a Foreman Personal Access Token, set both `FOREMAN_USERNAME` and `FOREMAN_API_TOKEN`; Foreman authenticates PATs as HTTP Basic username/token credentials. Leave TLS verification enabled. Job invocation/status code is isolated in `app/foreman/client.py` because Foreman API details can vary by version.
+ 
++By default, `FOREMAN_PREFLIGHT_INPUTS_ON_SUBMIT=true`: each request validates the Chiklet `foreman.input_map` against the live Foreman template inputs before it enters approval. The worker repeats this check immediately before execution. This prevents missing/stale mappings or blank Foreman inputs from silently overriding Ansible role defaults. The Foreman API identity therefore needs permission to read the configured job template and its template inputs as well as execute it.
++
+ ## Chiklets
+ Add JSON files under `chiklets/`. Each includes metadata, allowed server-group slugs, a Draft 2020-12 JSON Schema and a mapping from form field names to Foreman job-template inputs. The schema dynamically builds the end-user form: enums become dropdowns, booleans become toggles, numbers become numeric inputs, and defaults are editable unless `readOnly: true`. Submitted values are validated against the same schema and snapshotted at request time.
+ 
+diff --git a/app/catalog/service.py b/app/catalog/service.py
+index 724bd46..08fefdc 100644
+--- a/app/catalog/service.py
++++ b/app/catalog/service.py
+@@ -117,6 +117,15 @@ def _validate_definition(data, source=""):
+             f"{', '.join(unknown_sources)}"
+         )
+ 
++    allow_unmapped = foreman.get("allow_unmapped_inputs", [])
++    if not isinstance(allow_unmapped, list) or not all(isinstance(name, str) and name.strip() for name in allow_unmapped):
++        raise ChikletError(f"{source}: foreman.allow_unmapped_inputs must be a list of non-empty input names")
++    overlap = sorted(set(input_map) & set(allow_unmapped))
++    if overlap:
++        raise ChikletError(
++            f"{source}: foreman.allow_unmapped_inputs cannot include already mapped input(s): {', '.join(overlap)}"
++        )
++
+ 
+ def list_chiklets():
+     base = Path(current_app.config["CHIKLET_DIRECTORY"])
+diff --git a/app/config.py b/app/config.py
+index 4604eef..a663301 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -56,6 +56,7 @@ class Config:
+     FOREMAN_VERIFY_TLS = env_bool("FOREMAN_VERIFY_TLS", True)
+     FOREMAN_TIMEOUT_SECONDS = int(os.getenv("FOREMAN_TIMEOUT_SECONDS", "30"))
+     FOREMAN_RECONCILE_INTERVAL_SECONDS = max(2.0, float(os.getenv("FOREMAN_RECONCILE_INTERVAL_SECONDS", "5")))
++    FOREMAN_PREFLIGHT_INPUTS_ON_SUBMIT = env_bool("FOREMAN_PREFLIGHT_INPUTS_ON_SUBMIT", True)
+     FOREMAN_MOCK = env_bool("FOREMAN_MOCK", True)
+ 
+     LOCAL_LOCKOUT_ATTEMPTS = int(os.getenv("LOCAL_LOCKOUT_ATTEMPTS", "5"))
+diff --git a/app/foreman/client.py b/app/foreman/client.py
+index 1ec7019..0eb9156 100644
+--- a/app/foreman/client.py
++++ b/app/foreman/client.py
+@@ -11,10 +11,18 @@ class ForemanError(RuntimeError):
+         self.response_text = response_text
+ 
+ 
++class ForemanContractError(ForemanError):
++    """The Chiklet schema/input_map does not safely match the Foreman template."""
++
++
+ def _escape(value):
+     return value.replace("\\", "\\\\").replace('"', '\\"')
+ 
+ 
++def _is_blank(value):
++    return value is None or value == "" or value == []
++
++
+ class ForemanClient:
+     def __init__(self):
+         cfg = current_app.config
+@@ -63,6 +71,111 @@ class ForemanClient:
+             raise ForemanError(f"Foreman job template not found: {cfg['job_template_name']}")
+         return str(matches[0]["id"])
+ 
++    def get_template_inputs(self, template_id):
++        """Return the user/template inputs exposed by a Foreman job template.
++
++        Foreman exposes job-template inputs through the generic templates API:
++        GET /api/templates/:template_id/template_inputs.
++        """
++        if self.mock:
++            return []
++        data = self._request(
++            "GET",
++            f"/api/templates/{template_id}/template_inputs",
++            params={"per_page": "all"},
++        )
++        return data.get("results", [])
++
++    def validate_input_contract(self, config_snapshot, template_id=None):
++        """Fail closed when the Chiklet/Foreman input contract is inconsistent.
++
++        Every input_map destination must exist in Foreman. Conversely, a Foreman
++        template input that is not mapped must have a non-blank Foreman default,
++        unless it is explicitly listed in foreman.allow_unmapped_inputs. This
++        prevents blank template inputs silently overriding Ansible role defaults.
++        """
++        if self.mock:
++            return {}
++
++        fcfg = config_snapshot["foreman"]
++        template_id = template_id or self.resolve_template_id(fcfg)
++        remote_inputs = self.get_template_inputs(template_id)
++        remote_by_name = {
++            item.get("name"): item
++            for item in remote_inputs
++            if isinstance(item, dict) and item.get("name")
++        }
++        mapped_names = set((fcfg.get("input_map") or {}).keys())
++        allowed_unmapped = set(fcfg.get("allow_unmapped_inputs") or [])
++
++        missing_in_foreman = sorted(mapped_names - set(remote_by_name))
++        if missing_in_foreman:
++            raise ForemanContractError(
++                "Chiklet maps Foreman input(s) that do not exist on template "
++                f"{template_id}: {', '.join(missing_in_foreman)}"
++            )
++
++        unsafe_unmapped = []
++        for name, item in remote_by_name.items():
++            if name in mapped_names or name in allowed_unmapped:
++                continue
++            if item.get("required") is True or _is_blank(item.get("default")):
++                unsafe_unmapped.append(name)
++
++        if unsafe_unmapped:
++            raise ForemanContractError(
++                "Foreman template has unmapped input(s) with no safe default: "
++                f"{', '.join(sorted(unsafe_unmapped))}. Add them to the Chiklet form_schema/input_map, "
++                "set a non-blank Foreman default, or explicitly list intentional exceptions in "
++                "foreman.allow_unmapped_inputs."
++            )
++        return remote_by_name
++
++    def build_inputs(self, config_snapshot, form_data, remote_by_name=None):
++        """Build Foreman inputs from the immutable request plus schema defaults.
++
++        The request snapshot is normally complete, but schema defaults are applied
++        again defensively so an older/incomplete snapshot cannot cause a mapped
++        enum/default value to become an empty Foreman input.
++        """
++        fcfg = config_snapshot["foreman"]
++        properties = (config_snapshot.get("form_schema") or {}).get("properties") or {}
++        inputs = {}
++
++        for foreman_name, source_name in (fcfg.get("input_map") or {}).items():
++            spec = properties.get(source_name) or {}
++            has_value = source_name in form_data
++            value = form_data.get(source_name)
++
++            # Empty/missing values must not discard a meaningful schema default.
++            if (not has_value or _is_blank(value)) and "default" in spec and not _is_blank(spec.get("default")):
++                value = spec["default"]
++                has_value = True
++
++            if has_value:
++                inputs[foreman_name] = value
++                continue
++
++            # If the Chiklet did not provide a value, leave a non-blank Foreman
++            # default alone. Otherwise required remote inputs are a contract error.
++            remote = (remote_by_name or {}).get(foreman_name, {})
++            if not _is_blank(remote.get("default")):
++                continue
++            if remote.get("required") is True:
++                raise ForemanContractError(
++                    f"Mapped Foreman input {foreman_name!r} has no submitted value, schema default, or Foreman default"
++                )
++
++        return inputs
++
++    def preflight_inputs(self, config_snapshot, form_data):
++        """Resolve the template, validate the live input contract and build inputs."""
++        if self.mock:
++            return None, self.build_inputs(config_snapshot, form_data)
++        template_id = self.resolve_template_id(config_snapshot["foreman"])
++        remote_by_name = self.validate_input_contract(config_snapshot, template_id=template_id)
++        return template_id, self.build_inputs(config_snapshot, form_data, remote_by_name=remote_by_name)
++
+     def find_job_by_correlation(self, correlation_id):
+         if self.mock:
+             return None
+@@ -83,12 +196,7 @@ class ForemanClient:
+             import secrets
+ 
+             return {"id": f"mock-{secrets.token_hex(4)}", "status_label": "queued"}
+-        fcfg = config_snapshot["foreman"]
+-        template_id = self.resolve_template_id(fcfg)
+-        inputs = {}
+-        for foreman_name, source_name in fcfg.get("input_map", {}).items():
+-            if source_name in form_data:
+-                inputs[foreman_name] = form_data[source_name]
++        template_id, inputs = self.preflight_inputs(config_snapshot, form_data)
+         description = f"Self-Service {{job_category}} - {target_snapshot['name']}"
+         if correlation_id:
+             description += f" | {correlation_id}"
+diff --git a/app/jobs/tasks.py b/app/jobs/tasks.py
+index 3d87910..cceeb93 100644
+--- a/app/jobs/tasks.py
++++ b/app/jobs/tasks.py
+@@ -3,7 +3,7 @@ from flask import current_app
+ from redis import Redis
+ from ..extensions import db
+ from ..models import DeploymentRequest, JobExecution, utcnow
+-from ..foreman.client import ForemanClient
++from ..foreman.client import ForemanClient, ForemanContractError
+ from ..audit.service import audit
+ 
+ 
+@@ -101,6 +101,26 @@ def execute_request(self, request_id):
+                 details={"foreman_job_id": execn.foreman_job_id, "correlation": item.request_number},
+             )
+             db.session.commit()
++        except ForemanContractError as exc:
++            # Configuration/input contract errors are deterministic. Retrying them
++            # cannot help and, most importantly, no Foreman invocation has been sent.
++            db.session.rollback()
++            item = db.session.get(DeploymentRequest, request_id)
++            execn = item.execution
++            execn.status = "failed"
++            execn.status_label = "input contract failed"
++            execn.error_message = str(exc)[:4000]
++            execn.finished_at = execn.finished_at or utcnow()
++            item.status = "failed"
++            item.completed_at = item.completed_at or utcnow()
++            audit(
++                "FOREMAN_INPUT_CONTRACT_FAILED",
++                entity_type="deployment_request",
++                entity_id=item.id,
++                details={"error": str(exc)[:1000]},
++            )
++            db.session.commit()
++            return
+         except Exception as exc:
+             db.session.rollback()
+             item = db.session.get(DeploymentRequest, request_id)
+diff --git a/app/requests/routes.py b/app/requests/routes.py
+index 194dfa4..d22cb92 100644
+--- a/app/requests/routes.py
++++ b/app/requests/routes.py
+@@ -1,6 +1,6 @@
+ from datetime import datetime, timezone
+ import secrets
+-from flask import Blueprint, abort, flash, redirect, render_template, request, url_for
++from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, url_for
+ from flask_login import login_required, current_user
+ from ..extensions import db
+ from ..models import DeploymentRequest, Server, RequestStatus
+@@ -13,6 +13,7 @@ from ..catalog.service import (
+     authorised_servers,
+ )
+ from ..audit.service import audit
++from ..foreman.client import ForemanClient, ForemanContractError, ForemanError
+ 
+ bp = Blueprint("requests", __name__, url_prefix="/requests")
+ 
+@@ -53,6 +54,40 @@ def submit(chiklet_id):
+             400,
+         )
+ 
++    if current_app.config["FOREMAN_PREFLIGHT_INPUTS_ON_SUBMIT"]:
++        try:
++            # Validate the live Foreman template contract and the resolved inputs
++            # before the request enters the approval queue. The worker repeats
++            # this check immediately before execution as defence in depth.
++            ForemanClient().preflight_inputs(chiklet, form_data)
++        except ForemanContractError as exc:
++            flash(f"Application configuration error: {exc}", "danger")
++            return (
++                render_template(
++                    "catalog/detail.html",
++                    chiklet=chiklet,
++                    servers=authorised_servers(current_user, chiklet),
++                    form_layout=build_form_layout(chiklet, form_data),
++                    selected_server_id=server.id,
++                    justification=request.form.get("justification", ""),
++                ),
++                409,
++            )
++        except ForemanError:
++            current_app.logger.exception("Foreman input preflight failed for Chiklet %s", chiklet["id"])
++            flash("Foreman is temporarily unavailable for input validation. Please try again.", "danger")
++            return (
++                render_template(
++                    "catalog/detail.html",
++                    chiklet=chiklet,
++                    servers=authorised_servers(current_user, chiklet),
++                    form_layout=build_form_layout(chiklet, form_data),
++                    selected_server_id=server.id,
++                    justification=request.form.get("justification", ""),
++                ),
++                503,
++            )
++
+     item = DeploymentRequest(
+         request_number=_request_number(),
+         requested_by_id=current_user.id,
+diff --git a/docs/CHIKLETS.md b/docs/CHIKLETS.md
+index 235c36a..ff142e2 100644
+--- a/docs/CHIKLETS.md
++++ b/docs/CHIKLETS.md
+@@ -144,6 +144,43 @@ The left side is the Foreman job-template input name. The right side is the Chik
+ 
+ Every `input_map` source must exist in `form_schema.properties`. Invalid Chiklet definitions are rejected when loaded rather than allowing an unmapped or hidden value to reach Foreman.
+ 
++### Live Foreman input contract
++
++When `FOREMAN_PREFLIGHT_INPUTS_ON_SUBMIT=true` (the production default), Self-Service also resolves the configured Foreman job template and reads its live template inputs before accepting a request. The request is rejected if:
++
++- an `input_map` destination does not exist on the Foreman template; or
++- the Foreman template exposes an unmapped input that is required or has a blank default.
++
++This prevents a blank Foreman input from silently overriding an Ansible role default. The same pre-flight is repeated by the worker immediately before job creation, so a template changed after approval still fails closed without launching Ansible.
++
++Schema defaults are defensively re-applied while building the Foreman payload. For example, if the Chiklet defines:
++
++```json
++"mssql_repo_source": {
++  "type": "string",
++  "enum": ["katello", "microsoft"],
++  "default": "katello"
++}
++```
++
++then `katello` is sent for a mapped `mssql_repo_source` even if an older/incomplete request snapshot contains an empty value.
++
++A Foreman template may intentionally have an input that Self-Service does not control. If that input legitimately has a blank default, explicitly acknowledge it in the Chiklet:
++
++```json
++"foreman": {
++  "job_template_name": "SelfService - Example",
++  "input_map": {
++    "managed_input": "managed_field"
++  },
++  "allow_unmapped_inputs": [
++    "optional_external_input"
++  ]
++}
++```
++
++Use `allow_unmapped_inputs` sparingly; mapped inputs are preferable because they are visible in the approval snapshot and audit trail.
++
+ ## Security
+ 
+ Raw passwords and secret fields are intentionally prohibited from Chiklet forms because submitted values become part of the immutable request/audit history. Pass secret references and resolve the actual secret in Foreman, Ansible Vault, or the organisation's secret-management platform.
+diff --git a/tests/test_schema_driven_forms.py b/tests/test_schema_driven_forms.py
+index f438f9b..0e951c4 100644
+--- a/tests/test_schema_driven_forms.py
++++ b/tests/test_schema_driven_forms.py
+@@ -176,6 +176,17 @@ def test_foreman_input_map_uses_customised_form_values(app):
+         captured = {}
+ 
+         def fake_request(method, path, **kwargs):
++            if method == "GET" and path == "/api/templates/245/template_inputs":
++                return {
++                    "results": [
++                        {"name": "package_name", "required": True, "default": None},
++                        {"name": "package_state", "required": True, "default": None},
++                        {"name": "restart_service", "required": False, "default": "false"},
++                        {"name": "worker_count", "required": True, "default": None},
++                        {"name": "deployment_notes", "required": False, "default": "optional"},
++                        {"name": "repository", "required": True, "default": None},
++                    ]
++                }
+             captured["method"] = method
+             captured["path"] = path
+             captured["payload"] = kwargs["json"]
+@@ -198,3 +209,116 @@ def test_foreman_input_map_uses_customised_form_values(app):
+         "deployment_notes": "Custom deployment",
+         "repository": "approved-production-repo",
+     }
++
++
++def test_foreman_input_map_reapplies_nonblank_schema_defaults(app):
++    from app.foreman.client import ForemanClient
++
++    chiklet = _schema_chiklet(app)
++    # Simulate an older/incomplete request snapshot where enum values became blank.
++    submitted = {
++        "package": "",
++        "state": "",
++        "restart": False,
++        "workers": 12,
++        "notes": "Custom deployment",
++        "repository": "approved-production-repo",
++    }
++
++    with app.app_context():
++        client = ForemanClient()
++        client.mock = False
++        client.resolve_template_id = lambda cfg: "245"
++
++        def fake_request(method, path, **kwargs):
++            if method == "GET" and path == "/api/templates/245/template_inputs":
++                return {
++                    "results": [
++                        {"name": "package_name", "required": True, "default": None},
++                        {"name": "package_state", "required": True, "default": None},
++                        {"name": "restart_service", "required": False, "default": "false"},
++                        {"name": "worker_count", "required": True, "default": None},
++                        {"name": "deployment_notes", "required": False, "default": "optional"},
++                        {"name": "repository", "required": True, "default": None},
++                    ]
++                }
++            if method == "POST":
++                return {"id": 1000, "status_label": "queued", "payload": kwargs["json"]}
++            raise AssertionError((method, path))
++
++        client._request = fake_request
++        template_id, inputs = client.preflight_inputs(chiklet, submitted)
++
++    assert template_id == "245"
++    assert inputs["package_name"] == "v2"
++    assert inputs["package_state"] == "present"
++    assert inputs["restart_service"] is False
++
++
++def test_foreman_contract_rejects_input_map_name_missing_from_template(app):
++    from app.foreman.client import ForemanClient, ForemanContractError
++
++    chiklet = _schema_chiklet(app)
++    with app.app_context():
++        client = ForemanClient()
++        client.mock = False
++        client.resolve_template_id = lambda cfg: "245"
++        client._request = lambda method, path, **kwargs: {
++            "results": [
++                {"name": "package_name", "required": True, "default": None},
++                # package_state is deliberately missing
++                {"name": "restart_service", "required": False, "default": "false"},
++                {"name": "worker_count", "required": True, "default": None},
++                {"name": "deployment_notes", "required": False, "default": "optional"},
++                {"name": "repository", "required": True, "default": None},
++            ]
++        }
++        with pytest.raises(ForemanContractError, match="package_state"):
++            client.validate_input_contract(chiklet, template_id="245")
++
++
++def test_foreman_contract_rejects_unmapped_blank_template_input(app):
++    from app.foreman.client import ForemanClient, ForemanContractError
++
++    chiklet = _schema_chiklet(app)
++    with app.app_context():
++        client = ForemanClient()
++        client.mock = False
++        client._request = lambda method, path, **kwargs: {
++            "results": [
++                {"name": "package_name", "required": True, "default": None},
++                {"name": "package_state", "required": True, "default": None},
++                {"name": "restart_service", "required": False, "default": "false"},
++                {"name": "worker_count", "required": True, "default": None},
++                {"name": "deployment_notes", "required": False, "default": "optional"},
++                {"name": "repository", "required": True, "default": None},
++                {"name": "mssql_repo_source", "required": False, "default": ""},
++            ]
++        }
++        with pytest.raises(ForemanContractError, match="mssql_repo_source"):
++            client.validate_input_contract(chiklet, template_id="245")
++
++
++def test_allow_unmapped_foreman_input_requires_explicit_exception(app):
++    from app.foreman.client import ForemanClient
++
++    chiklet = _schema_chiklet(app)
++    chiklet["foreman"]["allow_unmapped_inputs"] = ["optional_external_input"]
++    _validate_definition(chiklet, "schema-ui-test.json")
++
++    with app.app_context():
++        client = ForemanClient()
++        client.mock = False
++        client._request = lambda method, path, **kwargs: {
++            "results": [
++                {"name": "package_name", "required": True, "default": None},
++                {"name": "package_state", "required": True, "default": None},
++                {"name": "restart_service", "required": False, "default": "false"},
++                {"name": "worker_count", "required": True, "default": None},
++                {"name": "deployment_notes", "required": False, "default": "optional"},
++                {"name": "repository", "required": True, "default": None},
++                {"name": "optional_external_input", "required": False, "default": ""},
++            ]
++        }
++        remote = client.validate_input_contract(chiklet, template_id="245")
++    assert "optional_external_input" in remote

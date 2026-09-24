@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "foreman-selfservice.fullname" . }}
+  labels:
+    {{- include "foreman-selfservice.labels" . | nindent 4 }}
+data:
+  PORTAL_HOSTNAME: {{ .Values.config.portalHostname | quote }}
+  SESSION_COOKIE_SECURE: {{ .Values.config.sessionCookieSecure | quote }}
+  TRUST_PROXY_HEADERS: {{ .Values.config.trustProxyHeaders | quote }}
+  DEFAULT_AUTH_PROVIDER: {{ .Values.config.auth.defaultProvider | quote }}
+  ENABLE_ENTRA: {{ .Values.config.auth.enableEntra | quote }}
+  ENABLE_LDAP: {{ .Values.config.auth.enableLdap | quote }}
+  ENABLE_LOCAL: {{ .Values.config.auth.enableLocal | quote }}
+  ALLOW_IDENTITY_AUTO_LINK: {{ .Values.config.auth.allowIdentityAutoLink | quote }}
+  ENTRA_TENANT_ID: {{ .Values.config.entra.tenantId | quote }}
+  ENTRA_CLIENT_ID: {{ .Values.config.entra.clientId | quote }}
+  ENTRA_REDIRECT_URI: {{ .Values.config.entra.redirectUri | quote }}
+  ENTRA_AUTO_PROVISION: {{ .Values.config.entra.autoProvision | quote }}
+  LDAP_URI: {{ .Values.config.ldap.uri | quote }}
+  LDAP_BASE_DN: {{ .Values.config.ldap.baseDn | quote }}
+  LDAP_BIND_DN: {{ .Values.config.ldap.bindDn | quote }}
+  LDAP_USER_FILTER: {{ .Values.config.ldap.userFilter | quote }}
+  LDAP_USERNAME_ATTRIBUTE: {{ .Values.config.ldap.usernameAttribute | quote }}
+  LDAP_EMAIL_ATTRIBUTE: {{ .Values.config.ldap.emailAttribute | quote }}
+  LDAP_DISPLAYNAME_ATTRIBUTE: {{ .Values.config.ldap.displayNameAttribute | quote }}
+  LDAP_TLS_VALIDATE: {{ .Values.config.ldap.tlsValidate | quote }}
+  LDAP_AUTO_PROVISION: {{ .Values.config.ldap.autoProvision | quote }}
+  FOREMAN_URL: {{ .Values.config.foreman.url | quote }}
+  FOREMAN_USERNAME: {{ .Values.config.foreman.username | quote }}
+  FOREMAN_VERIFY_TLS: {{ .Values.config.foreman.verifyTls | quote }}
+  FOREMAN_TIMEOUT_SECONDS: {{ .Values.config.foreman.timeoutSeconds | quote }}
+  FOREMAN_RECONCILE_INTERVAL_SECONDS: {{ .Values.config.foreman.reconcileIntervalSeconds | quote }}
+  FOREMAN_MOCK: {{ .Values.config.foreman.mock | quote }}
+  LOCAL_LOCKOUT_ATTEMPTS: {{ .Values.config.localAuth.lockoutAttempts | quote }}
+  LOCAL_LOCKOUT_MINUTES: {{ .Values.config.localAuth.lockoutMinutes | quote }}

@@ -1,0 +1,21 @@
+# Example starting point only. Egress addresses are environment-specific.
+# Replace every placeholder CIDR/port before enabling in production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: foreman-selfservice-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: foreman-selfservice
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster DNS - selectors vary by distribution/CNI.
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # PostgreSQL / Redis / Foreman / LDAP / Entra egress must be added for your
+    # environment before using an egress-deny policy.

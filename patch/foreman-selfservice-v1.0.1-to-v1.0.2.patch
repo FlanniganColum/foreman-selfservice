@@ -1,0 +1,418 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index eaef8bf..cb8e476 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,13 @@
+ # Changelog
+ 
++## 1.0.2
++
++- Added `allowed_server_groups: ["*"]` wildcard support without weakening per-user server-group RBAC.
++- Centralised target-server authorization so catalogue filtering and request submission use the same server-side rule.
++- Added structured Chiklet image/text icons while preserving legacy string/emoji icons.
++- Added authenticated hot-loading of assets from `chiklets/assets/` with supported image-type validation and no-cache responses.
++- Updated Chiklet authoring documentation with wildcard, asset and MSSQL ODBC examples.
++
+ ## 1.0.1
+ 
+ - Fixed Celery 5.5 startup failure caused by calling the non-existent `Celery.config_from_mapping` method.
+diff --git a/app/catalog/routes.py b/app/catalog/routes.py
+index 5c2d4f2..fcff766 100644
+--- a/app/catalog/routes.py
++++ b/app/catalog/routes.py
+@@ -1,8 +1,10 @@
+-from flask import Blueprint,abort,render_template
++from pathlib import Path
++from flask import Blueprint,abort,current_app,render_template,send_from_directory
+ from flask_login import login_required,current_user
+ from ..extensions import db
+ from ..models import Server
+-from .service import list_chiklets,get_chiklet,can_user_access_chiklet
++from .service import list_chiklets,get_chiklet,can_user_access_chiklet,can_user_target_server
++
+ bp=Blueprint("catalog",__name__)
+ 
+ @bp.get("/")
+@@ -14,11 +16,21 @@ def index():
+ @login_required
+ def detail(chiklet_id):
+     chiklet=get_chiklet(chiklet_id)
+-    if not chiklet or not can_user_access_chiklet(current_user,chiklet): abort(404)
+-    allowed=set(chiklet["allowed_server_groups"])
++    if not chiklet or not can_user_access_chiklet(current_user,chiklet):
++        abort(404)
+     servers=db.session.scalars(db.select(Server).where(Server.enabled.is_(True)).order_by(Server.name)).all()
+-    if current_user.is_global_admin(): servers=[s for s in servers if s.group and s.group.slug in allowed]
+-    else:
+-        gids={g.id for g in current_user.server_groups if g.slug in allowed}
+-        servers=[s for s in servers if s.group_id in gids]
++    servers=[s for s in servers if can_user_target_server(current_user,chiklet,s)]
+     return render_template("catalog/detail.html",chiklet=chiklet,servers=servers)
++
++@bp.get("/chiklet-assets/<path:filename>")
++@login_required
++def asset(filename):
++    suffix=Path(filename).suffix.lower()
++    if suffix not in {".svg",".png",".jpg",".jpeg",".webp"}:
++        abort(404)
++    asset_dir=Path(current_app.config["CHIKLET_DIRECTORY"])/"assets"
++    response=send_from_directory(asset_dir,filename,conditional=True,max_age=0)
++    response.headers["Cache-Control"]="no-cache, no-store, must-revalidate"
++    response.headers["Content-Security-Policy"]="default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox"
++    response.headers["X-Content-Type-Options"]="nosniff"
++    return response
+diff --git a/app/catalog/service.py b/app/catalog/service.py
+index 848fec9..338ddd4 100644
+--- a/app/catalog/service.py
++++ b/app/catalog/service.py
+@@ -3,22 +3,60 @@ from pathlib import Path
+ from functools import lru_cache
+ from flask import current_app
+ from jsonschema import Draft202012Validator
+-class ChikletError(ValueError): pass
++
++class ChikletError(ValueError):
++    pass
+ 
+ @lru_cache(maxsize=256)
+ def _load_file_cached(path,mtime_ns):
+-    with open(path,"r",encoding="utf-8") as f: data=json.load(f)
+-    _validate_definition(data,path); return data
++    with open(path,"r",encoding="utf-8") as f:
++        data=json.load(f)
++    _validate_definition(data,path)
++    return data
+ 
+ def _validate_definition(data,source=""):
+     required={"id","version","name","description","icon","allowed_server_groups","form_schema","foreman"}
+     missing=sorted(required-set(data))
+-    if missing: raise ChikletError(f"{source}: missing keys: {', '.join(missing)}")
++    if missing:
++        raise ChikletError(f"{source}: missing keys: {', '.join(missing)}")
++
++    allowed_groups=data.get("allowed_server_groups")
++    if not isinstance(allowed_groups,list) or not allowed_groups or not all(isinstance(x,str) and x.strip() for x in allowed_groups):
++        raise ChikletError(f"{source}: allowed_server_groups must be a non-empty list of group slugs or ['*']")
++    if "*" in allowed_groups and allowed_groups != ["*"]:
++        raise ChikletError(f"{source}: wildcard '*' must be the only entry in allowed_server_groups")
++
++    icon=data.get("icon")
++    if isinstance(icon,str):
++        if not icon.strip():
++            raise ChikletError(f"{source}: icon cannot be empty")
++    elif isinstance(icon,dict):
++        icon_type=icon.get("type")
++        if icon_type=="image":
++            src=icon.get("src")
++            if not isinstance(src,str) or not src.strip():
++                raise ChikletError(f"{source}: image icon requires a non-empty src")
++            if not src.startswith("/"):
++                path=Path(src)
++                if path.is_absolute() or ".." in path.parts:
++                    raise ChikletError(f"{source}: image icon src must be relative to chiklets/assets and cannot traverse directories")
++                if path.suffix.lower() not in {".svg",".png",".jpg",".jpeg",".webp"}:
++                    raise ChikletError(f"{source}: unsupported image icon extension {path.suffix!r}")
++        elif icon_type=="text":
++            value=icon.get("value")
++            if not isinstance(value,str) or not value.strip():
++                raise ChikletError(f"{source}: text icon requires a non-empty value")
++        else:
++            raise ChikletError(f"{source}: icon.type must be 'image' or 'text'")
++    else:
++        raise ChikletError(f"{source}: icon must be a string or an icon object")
++
+     Draft202012Validator.check_schema(data["form_schema"])
+     for field_name,spec in data["form_schema"].get("properties",{}).items():
+         if spec.get("format") in {"password","secret"} or spec.get("x-sensitive") is True:
+             raise ChikletError(f"{source}: raw secret field {field_name!r} is not permitted; use a secret reference resolved by Foreman/Vault instead")
+-    if "job_template_id" not in data["foreman"] and "job_template_name" not in data["foreman"]: raise ChikletError(f"{source}: foreman job template is required")
++    if "job_template_id" not in data["foreman"] and "job_template_name" not in data["foreman"]:
++        raise ChikletError(f"{source}: foreman job template is required")
+ 
+ def list_chiklets():
+     base=Path(current_app.config["CHIKLET_DIRECTORY"])
+@@ -27,26 +65,54 @@ def list_chiklets():
+ def get_chiklet(chiklet_id):
+     return next((x for x in list_chiklets() if x["id"]==chiklet_id),None)
+ 
++def chiklet_allows_group(chiklet,group_slug):
++    allowed=set(chiklet.get("allowed_server_groups",[]))
++    return "*" in allowed or group_slug in allowed
++
+ def can_user_access_chiklet(user,chiklet):
+-    if user.is_global_admin(): return True
+-    return bool(set(chiklet.get("allowed_server_groups",[])) & {g.slug for g in user.server_groups if g.enabled})
++    if user.is_global_admin():
++        return True
++    user_groups={g.slug for g in user.server_groups if g.enabled}
++    allowed=set(chiklet.get("allowed_server_groups",[]))
++    if "*" in allowed:
++        return bool(user_groups)
++    return bool(allowed & user_groups)
++
++def can_user_target_server(user,chiklet,server):
++    if not server or not server.enabled or not server.group or not server.group.enabled:
++        return False
++    if not chiklet_allows_group(chiklet,server.group.slug):
++        return False
++    if user.is_global_admin():
++        return True
++    return any(g.enabled and g.id==server.group_id for g in user.server_groups)
+ 
+ def field_value_from_request(prop,spec,form):
+-    raw=form.get(f"field__{prop}"); t=spec.get("type")
+-    if t=="boolean": return raw in {"1","true","on","yes"}
+-    if t=="integer": return int(raw) if raw not in (None,"") else None
+-    if t=="number": return float(raw) if raw not in (None,"") else None
+-    if t=="array": return form.getlist(f"field__{prop}")
++    raw=form.get(f"field__{prop}")
++    t=spec.get("type")
++    if t=="boolean":
++        return raw in {"1","true","on","yes"}
++    if t=="integer":
++        return int(raw) if raw not in (None,"") else None
++    if t=="number":
++        return float(raw) if raw not in (None,"") else None
++    if t=="array":
++        return form.getlist(f"field__{prop}")
+     return raw
+ 
+ def validate_form(chiklet,form):
+-    schema=chiklet["form_schema"]; data={}; errors=[]
++    schema=chiklet["form_schema"]
++    data={}
++    errors=[]
+     for prop,spec in schema.get("properties",{}).items():
+         try:
+             value=field_value_from_request(prop,spec,form)
+-            if value not in (None,"",[]): data[prop]=value
+-            elif "default" in spec: data[prop]=spec["default"]
+-        except (TypeError,ValueError): errors.append(f"{spec.get('title',prop)} has an invalid value")
++            if value not in (None,"",[]):
++                data[prop]=value
++            elif "default" in spec:
++                data[prop]=spec["default"]
++        except (TypeError,ValueError):
++            errors.append(f"{spec.get('title',prop)} has an invalid value")
+     for e in sorted(Draft202012Validator(schema).iter_errors(data),key=lambda x:list(x.path)):
+         errors.append(f"{'.'.join(map(str,e.path)) or 'Form'}: {e.message}")
+     return data,errors
+diff --git a/app/requests/routes.py b/app/requests/routes.py
+index a106244..b2c7620 100644
+--- a/app/requests/routes.py
++++ b/app/requests/routes.py
+@@ -4,7 +4,7 @@ from flask import Blueprint,abort,flash,redirect,render_template,request,url_for
+ from flask_login import login_required,current_user
+ from ..extensions import db
+ from ..models import DeploymentRequest,Server,RequestStatus
+-from ..catalog.service import get_chiklet,can_user_access_chiklet,validate_form
++from ..catalog.service import get_chiklet,can_user_access_chiklet,can_user_target_server,validate_form
+ from ..audit.service import audit
+ bp=Blueprint("requests",__name__,url_prefix="/requests")
+ def _request_number(): return f"REQ-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{secrets.token_hex(6).upper()}"
+@@ -18,8 +18,7 @@ def submit(chiklet_id):
+     except ValueError: abort(400)
+     server=db.session.get(Server,server_id)
+     if not server or not server.enabled or not server.group: abort(400)
+-    allowed=set(chiklet["allowed_server_groups"]); user_gids={g.id for g in current_user.server_groups}
+-    if server.group.slug not in allowed or (not current_user.is_global_admin() and server.group_id not in user_gids): abort(403)
++    if not can_user_target_server(current_user,chiklet,server): abort(403)
+     form_data,errors=validate_form(chiklet,request.form)
+     if errors:
+         for e in errors: flash(e,"danger")
+diff --git a/app/static/css/app.css b/app/static/css/app.css
+index ec6af92..20b1e5c 100644
+--- a/app/static/css/app.css
++++ b/app/static/css/app.css
+@@ -1,4 +1,4 @@
+-:root{--navy:#0a2d52;--blue:#0b69b7;--teal:#0bb7a7;--bg:#f5f8fc;--card:#fff;--line:#dbe5ef;--text:#17324d;--muted:#64778b;--green:#167b55;--red:#b83a3a;--shadow:0 10px 35px rgba(12,47,78,.08)}*{box-sizing:border-box}body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}a{color:var(--blue);text-decoration:none}.topbar{min-height:78px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:10px 4vw;gap:38px;position:sticky;top:0;z-index:10}.brand img{height:50px;width:auto;display:block}.topbar nav{display:flex;gap:24px;flex:1}.topbar nav a{color:#38526b;font-weight:650}.topbar nav a:hover{color:var(--blue)}.identity{display:flex;align-items:center;gap:10px;font-size:14px}.pill{background:#e8f1fb;color:var(--navy);padding:5px 9px;border-radius:20px;text-transform:capitalize}.link-button{border:0;background:none;color:var(--blue);cursor:pointer;font:inherit}.shell{max-width:1280px;margin:0 auto;padding:42px 28px 70px}footer{padding:30px;text-align:center;color:var(--muted);font-size:13px;border-top:1px solid var(--line);background:#fff}.page-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:28px}.page-heading h1,.card h1{margin:6px 0 8px;font-size:34px;line-height:1.1;color:var(--navy)}.page-heading p,.lede{color:var(--muted);font-size:17px}.eyebrow{font-size:12px;font-weight:800;letter-spacing:.15em;color:var(--teal)}.chiklet-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:18px}.chiklet{background:#fff;border:1px solid var(--line);border-radius:18px;padding:24px;display:grid;grid-template-columns:58px 1fr auto;gap:18px;align-items:start;color:var(--text);box-shadow:0 4px 14px rgba(12,47,78,.04);transition:.18s ease}.chiklet:hover{transform:translateY(-3px);border-color:#9cc5e6;box-shadow:var(--shadow)}.chiklet h3{margin:0 0 8px;color:var(--navy)}.chiklet p{margin:0 0 14px;color:var(--muted);line-height:1.5}.chiklet-icon,.big-icon{width:58px;height:58px;border-radius:15px;display:grid;place-items:center;background:linear-gradient(135deg,#e5f5ff,#e2fbf6);font-size:29px}.big-icon{width:82px;height:82px;font-size:42px}.arrow{font-size:24px;color:#94acc1}.meta{font-size:12px;color:#7e91a3}.card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:28px;box-shadow:0 4px 14px rgba(12,47,78,.04);margin-bottom:20px}.detail-layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(270px,.8fr);gap:22px}.side-card{align-self:start;position:sticky;top:100px}.stack{display:grid;gap:18px;margin-top:24px}label{display:grid;gap:7px;font-weight:650;color:#27445e}label b{color:var(--red);margin-left:3px}input,select,textarea{width:100%;border:1px solid #cbd9e6;border-radius:10px;padding:11px 12px;background:#fff;color:var(--text);font:inherit}input:focus,select:focus,textarea:focus{outline:3px solid rgba(11,105,183,.12);border-color:var(--blue)}small,.muted{color:var(--muted);font-weight:400}.button{border:0;border-radius:10px;padding:11px 16px;display:inline-flex;align-items:center;justify-content:center;font-weight:750;cursor:pointer;font:inherit}.primary{background:var(--blue);color:#fff}.secondary{background:var(--navy);color:#fff}.subtle{background:#eef4f8;color:var(--navy)}.success{background:#e1f4eb;color:#126343}.danger-btn{background:#fae8e8;color:#9a2828}.small{padding:7px 10px;font-size:13px}.wide{width:100%;margin:9px 0}.callout{border-left:4px solid var(--teal);background:#eefbf8;padding:15px 17px;border-radius:8px;color:#2c5f58}.back{display:inline-block;margin-bottom:18px}.table-card{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:14px;border-bottom:1px solid #e9eff5;vertical-align:middle}th{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#6f8295}.status{display:inline-block;border-radius:20px;padding:6px 10px;background:#e8edf3;color:#52687b;font-size:12px;font-weight:800;text-transform:capitalize}.status.succeeded{background:#e0f4eb;color:#146648}.status.failed,.status.rejected{background:#fae7e7;color:#9c2e2e}.status.running{background:#e1f0ff;color:#095da6}.status.pending_approval{background:#fff1d4;color:#825b0b}.status.queued,.status.approved{background:#e9e8ff;color:#4b45a7}.alert{padding:13px 16px;border-radius:10px;margin-bottom:18px;background:#eef3f7}.alert.success{background:#e3f4eb;color:#176a4a}.alert.danger{background:#f9e5e5;color:#922b2b}.alert.info{background:#e5f0fa}.kv-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin:20px 0}.kv-grid div{border:1px solid var(--line);border-radius:10px;padding:13px}.kv-grid span,.params span{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}.params{display:grid;gap:8px}.params>div{display:flex;justify-content:space-between;gap:20px;border-bottom:1px solid #edf2f6;padding:10px 0}.timeline-row{display:flex;gap:13px;margin:13px 0}.timeline-row .dot{width:10px;height:10px;border-radius:50%;background:var(--teal);margin-top:5px}.timeline-row small{display:block;margin-top:3px}.progress-steps{display:grid;gap:8px;margin-top:18px}.progress-steps div{padding:10px 12px;border-left:3px solid #d9e2ea;color:#8191a0}.progress-steps .done{border-color:var(--green);color:#245c49}.progress-steps .active{border-color:var(--blue);background:#f0f7fd;color:var(--blue)}dl{display:grid;grid-template-columns:1fr 1.3fr;gap:10px}dt{color:var(--muted)}dd{margin:0;font-weight:700}.approval-list{display:grid;gap:14px}.approval-card{display:grid;grid-template-columns:1fr 1.4fr;gap:24px}.approval-actions{display:grid;grid-template-columns:auto 1fr 1fr;gap:10px;align-items:end}.approval-actions form{display:grid;gap:8px}.auth-layout{min-height:70vh;display:grid;grid-template-columns:1.1fr .9fr;gap:60px;align-items:center}.auth-panel h1{font-size:52px;line-height:1.04;color:var(--navy);max-width:650px;margin:10px 0}.login-card{background:#fff;border:1px solid var(--line);border-radius:22px;padding:34px;box-shadow:var(--shadow);max-width:480px}.login-card h2{margin:0}.divider{display:flex;align-items:center;color:#8394a4;font-size:12px;margin:15px 0}.divider:before,.divider:after{content:"";height:1px;background:var(--line);flex:1;margin:0 10px}.login-card form{display:grid;gap:12px}.login-card details{margin-top:15px}.login-card summary{cursor:pointer;color:#61788d}.security-notes{display:flex;gap:10px;flex-wrap:wrap}.security-notes span{background:#e9f1f8;padding:8px 12px;border-radius:20px;color:#35546f;font-size:13px}.admin-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px}.clean-list{list-style:none;padding:0}.clean-list li{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)}.admin-user{border-bottom:1px solid var(--line);padding:12px 0}.admin-user summary{display:flex;justify-content:space-between;cursor:pointer}.admin-user form{padding:15px;background:#f8fafc;border-radius:10px;margin-top:12px}.check{display:flex;grid-template-columns:auto 1fr;align-items:center;font-weight:500}.check input{width:auto}fieldset{border:1px solid var(--line);border-radius:10px;padding:12px}legend{padding:0 5px;color:var(--muted)}.empty{background:#fff;border:1px dashed #bacbd9;border-radius:18px;text-align:center;padding:50px;color:var(--muted)}.empty h1,.empty h3{color:var(--navy)}@media(max-width:900px){.topbar{height:auto;flex-wrap:wrap;padding:14px 20px}.topbar nav{order:3;width:100%;overflow:auto}.identity{margin-left:auto}.detail-layout,.auth-layout,.approval-card,.admin-grid{grid-template-columns:1fr}.side-card{position:static}.approval-actions{grid-template-columns:1fr}.auth-panel{padding-top:20px}.auth-panel h1{font-size:40px}.brand img{height:40px}}@media(max-width:560px){.shell{padding:28px 16px}.page-heading{display:block}.kv-grid{grid-template-columns:1fr}.chiklet{grid-template-columns:50px 1fr}.arrow{display:none}}
++:root{--navy:#0a2d52;--blue:#0b69b7;--teal:#0bb7a7;--bg:#f5f8fc;--card:#fff;--line:#dbe5ef;--text:#17324d;--muted:#64778b;--green:#167b55;--red:#b83a3a;--shadow:0 10px 35px rgba(12,47,78,.08)}*{box-sizing:border-box}body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text)}a{color:var(--blue);text-decoration:none}.topbar{min-height:78px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:10px 4vw;gap:38px;position:sticky;top:0;z-index:10}.brand img{height:50px;width:auto;display:block}.topbar nav{display:flex;gap:24px;flex:1}.topbar nav a{color:#38526b;font-weight:650}.topbar nav a:hover{color:var(--blue)}.identity{display:flex;align-items:center;gap:10px;font-size:14px}.pill{background:#e8f1fb;color:var(--navy);padding:5px 9px;border-radius:20px;text-transform:capitalize}.link-button{border:0;background:none;color:var(--blue);cursor:pointer;font:inherit}.shell{max-width:1280px;margin:0 auto;padding:42px 28px 70px}footer{padding:30px;text-align:center;color:var(--muted);font-size:13px;border-top:1px solid var(--line);background:#fff}.page-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:28px}.page-heading h1,.card h1{margin:6px 0 8px;font-size:34px;line-height:1.1;color:var(--navy)}.page-heading p,.lede{color:var(--muted);font-size:17px}.eyebrow{font-size:12px;font-weight:800;letter-spacing:.15em;color:var(--teal)}.chiklet-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:18px}.chiklet{background:#fff;border:1px solid var(--line);border-radius:18px;padding:24px;display:grid;grid-template-columns:58px 1fr auto;gap:18px;align-items:start;color:var(--text);box-shadow:0 4px 14px rgba(12,47,78,.04);transition:.18s ease}.chiklet:hover{transform:translateY(-3px);border-color:#9cc5e6;box-shadow:var(--shadow)}.chiklet h3{margin:0 0 8px;color:var(--navy)}.chiklet p{margin:0 0 14px;color:var(--muted);line-height:1.5}.chiklet-icon,.big-icon{width:58px;height:58px;border-radius:15px;display:grid;place-items:center;background:linear-gradient(135deg,#e5f5ff,#e2fbf6);font-size:29px}.big-icon{width:82px;height:82px;font-size:42px}.chiklet-icon img,.big-icon img{display:block;max-width:80%;max-height:80%;width:auto;height:auto;object-fit:contain}.arrow{font-size:24px;color:#94acc1}.meta{font-size:12px;color:#7e91a3}.card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:28px;box-shadow:0 4px 14px rgba(12,47,78,.04);margin-bottom:20px}.detail-layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(270px,.8fr);gap:22px}.side-card{align-self:start;position:sticky;top:100px}.stack{display:grid;gap:18px;margin-top:24px}label{display:grid;gap:7px;font-weight:650;color:#27445e}label b{color:var(--red);margin-left:3px}input,select,textarea{width:100%;border:1px solid #cbd9e6;border-radius:10px;padding:11px 12px;background:#fff;color:var(--text);font:inherit}input:focus,select:focus,textarea:focus{outline:3px solid rgba(11,105,183,.12);border-color:var(--blue)}small,.muted{color:var(--muted);font-weight:400}.button{border:0;border-radius:10px;padding:11px 16px;display:inline-flex;align-items:center;justify-content:center;font-weight:750;cursor:pointer;font:inherit}.primary{background:var(--blue);color:#fff}.secondary{background:var(--navy);color:#fff}.subtle{background:#eef4f8;color:var(--navy)}.success{background:#e1f4eb;color:#126343}.danger-btn{background:#fae8e8;color:#9a2828}.small{padding:7px 10px;font-size:13px}.wide{width:100%;margin:9px 0}.callout{border-left:4px solid var(--teal);background:#eefbf8;padding:15px 17px;border-radius:8px;color:#2c5f58}.back{display:inline-block;margin-bottom:18px}.table-card{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:14px;border-bottom:1px solid #e9eff5;vertical-align:middle}th{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#6f8295}.status{display:inline-block;border-radius:20px;padding:6px 10px;background:#e8edf3;color:#52687b;font-size:12px;font-weight:800;text-transform:capitalize}.status.succeeded{background:#e0f4eb;color:#146648}.status.failed,.status.rejected{background:#fae7e7;color:#9c2e2e}.status.running{background:#e1f0ff;color:#095da6}.status.pending_approval{background:#fff1d4;color:#825b0b}.status.queued,.status.approved{background:#e9e8ff;color:#4b45a7}.alert{padding:13px 16px;border-radius:10px;margin-bottom:18px;background:#eef3f7}.alert.success{background:#e3f4eb;color:#176a4a}.alert.danger{background:#f9e5e5;color:#922b2b}.alert.info{background:#e5f0fa}.kv-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin:20px 0}.kv-grid div{border:1px solid var(--line);border-radius:10px;padding:13px}.kv-grid span,.params span{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}.params{display:grid;gap:8px}.params>div{display:flex;justify-content:space-between;gap:20px;border-bottom:1px solid #edf2f6;padding:10px 0}.timeline-row{display:flex;gap:13px;margin:13px 0}.timeline-row .dot{width:10px;height:10px;border-radius:50%;background:var(--teal);margin-top:5px}.timeline-row small{display:block;margin-top:3px}.progress-steps{display:grid;gap:8px;margin-top:18px}.progress-steps div{padding:10px 12px;border-left:3px solid #d9e2ea;color:#8191a0}.progress-steps .done{border-color:var(--green);color:#245c49}.progress-steps .active{border-color:var(--blue);background:#f0f7fd;color:var(--blue)}dl{display:grid;grid-template-columns:1fr 1.3fr;gap:10px}dt{color:var(--muted)}dd{margin:0;font-weight:700}.approval-list{display:grid;gap:14px}.approval-card{display:grid;grid-template-columns:1fr 1.4fr;gap:24px}.approval-actions{display:grid;grid-template-columns:auto 1fr 1fr;gap:10px;align-items:end}.approval-actions form{display:grid;gap:8px}.auth-layout{min-height:70vh;display:grid;grid-template-columns:1.1fr .9fr;gap:60px;align-items:center}.auth-panel h1{font-size:52px;line-height:1.04;color:var(--navy);max-width:650px;margin:10px 0}.login-card{background:#fff;border:1px solid var(--line);border-radius:22px;padding:34px;box-shadow:var(--shadow);max-width:480px}.login-card h2{margin:0}.divider{display:flex;align-items:center;color:#8394a4;font-size:12px;margin:15px 0}.divider:before,.divider:after{content:"";height:1px;background:var(--line);flex:1;margin:0 10px}.login-card form{display:grid;gap:12px}.login-card details{margin-top:15px}.login-card summary{cursor:pointer;color:#61788d}.security-notes{display:flex;gap:10px;flex-wrap:wrap}.security-notes span{background:#e9f1f8;padding:8px 12px;border-radius:20px;color:#35546f;font-size:13px}.admin-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px}.clean-list{list-style:none;padding:0}.clean-list li{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)}.admin-user{border-bottom:1px solid var(--line);padding:12px 0}.admin-user summary{display:flex;justify-content:space-between;cursor:pointer}.admin-user form{padding:15px;background:#f8fafc;border-radius:10px;margin-top:12px}.check{display:flex;grid-template-columns:auto 1fr;align-items:center;font-weight:500}.check input{width:auto}fieldset{border:1px solid var(--line);border-radius:10px;padding:12px}legend{padding:0 5px;color:var(--muted)}.empty{background:#fff;border:1px dashed #bacbd9;border-radius:18px;text-align:center;padding:50px;color:var(--muted)}.empty h1,.empty h3{color:var(--navy)}@media(max-width:900px){.topbar{height:auto;flex-wrap:wrap;padding:14px 20px}.topbar nav{order:3;width:100%;overflow:auto}.identity{margin-left:auto}.detail-layout,.auth-layout,.approval-card,.admin-grid{grid-template-columns:1fr}.side-card{position:static}.approval-actions{grid-template-columns:1fr}.auth-panel{padding-top:20px}.auth-panel h1{font-size:40px}.brand img{height:40px}}@media(max-width:560px){.shell{padding:28px 16px}.page-heading{display:block}.kv-grid{grid-template-columns:1fr}.chiklet{grid-template-columns:50px 1fr}.arrow{display:none}}
+ 
+ .audit-filter{display:grid;grid-template-columns:1.2fr 1fr 1.5fr auto;gap:12px;align-items:end}.json-cell{white-space:pre-wrap;max-width:420px;display:block}.toggle-row{display:flex;align-items:center;gap:10px;font-weight:500}.toggle-row input{width:auto}@media(max-width:900px){.audit-filter{grid-template-columns:1fr}}
+ 
+diff --git a/app/templates/catalog/detail.html b/app/templates/catalog/detail.html
+index 916766c..f21dcfc 100644
+--- a/app/templates/catalog/detail.html
++++ b/app/templates/catalog/detail.html
+@@ -9,4 +9,4 @@
+ {% if spec.description %}<small>{{ spec.description }}</small>{% endif %}</label>{% endfor %}
+ <label>Destination server<select name="server_id" required><option value="">Select an authorised server…</option>{% for s in servers %}<option value="{{ s.id }}">{{ s.name }}{% if s.ip_address %} · {{ s.ip_address }}{% endif %} · {{ s.group.name }}</option>{% endfor %}</select><small>The server list is filtered by both your entitlements and this Chiklet's allowed groups.</small></label>
+ <label>Business / change justification<textarea name="justification" rows="3" placeholder="Change reference, deployment purpose, incident reference…"></textarea></label><div class="callout">Submitting creates an immutable request for approval. No Foreman API job is started until an authorised approver accepts it.</div><button class="button primary">Submit for approval</button></form></section>
+-<aside class="card side-card"><div class="big-icon">{{ chiklet.icon }}</div><h3>Execution policy</h3><dl><dt>Approval</dt><dd>Required</dd><dt>Target</dt><dd>Authorised server only</dd><dt>Automation</dt><dd>{{ chiklet.foreman.job_template_name or ('Template #' ~ chiklet.foreman.job_template_id) }}</dd><dt>Audit</dt><dd>Full request & execution history</dd></dl></aside></div>{% endblock %}
++<aside class="card side-card"><div class="big-icon">{% if chiklet.icon is mapping and chiklet.icon.type == 'image' %}<img src="{% if chiklet.icon.src.startswith('/') %}{{ chiklet.icon.src }}{% else %}{{ url_for('catalog.asset',filename=chiklet.icon.src) }}{% endif %}" alt="{{ chiklet.icon.alt or chiklet.name }}">{% elif chiklet.icon is mapping and chiklet.icon.type == 'text' %}<span>{{ chiklet.icon.value }}</span>{% else %}<span>{{ chiklet.icon }}</span>{% endif %}</div><h3>Execution policy</h3><dl><dt>Approval</dt><dd>Required</dd><dt>Target</dt><dd>Authorised server only</dd><dt>Automation</dt><dd>{{ chiklet.foreman.job_template_name or ('Template #' ~ chiklet.foreman.job_template_id) }}</dd><dt>Audit</dt><dd>Full request & execution history</dd></dl></aside></div>{% endblock %}
+diff --git a/app/templates/catalog/index.html b/app/templates/catalog/index.html
+index 0cb7da0..8ebd290 100644
+--- a/app/templates/catalog/index.html
++++ b/app/templates/catalog/index.html
+@@ -1 +1 @@
+-{% extends "base.html" %}{% block content %}<div class="page-heading"><div><div class="eyebrow">APPLICATION CATALOGUE</div><h1>What would you like to deploy?</h1><p>Only applications and infrastructure groups you are authorised to use are shown.</p></div></div><div class="chiklet-grid">{% for c in chiklets %}<a class="chiklet" href="{{ url_for('catalog.detail',chiklet_id=c.id) }}"><div class="chiklet-icon"><span>{{ c.icon }}</span></div><div><h3>{{ c.name }}</h3><p>{{ c.description }}</p><div class="meta">{{ c.category or 'Automation' }} · v{{ c.version }}</div></div><span class="arrow">→</span></a>{% else %}<div class="empty"><h3>No applications available</h3><p>Your account has no Chiklets assigned through its server-group permissions.</p></div>{% endfor %}</div>{% endblock %}
++{% extends "base.html" %}{% block content %}<div class="page-heading"><div><div class="eyebrow">APPLICATION CATALOGUE</div><h1>What would you like to deploy?</h1><p>Only applications and infrastructure groups you are authorised to use are shown.</p></div></div><div class="chiklet-grid">{% for c in chiklets %}<a class="chiklet" href="{{ url_for('catalog.detail',chiklet_id=c.id) }}"><div class="chiklet-icon">{% if c.icon is mapping and c.icon.type == 'image' %}<img src="{% if c.icon.src.startswith('/') %}{{ c.icon.src }}{% else %}{{ url_for('catalog.asset',filename=c.icon.src) }}{% endif %}" alt="{{ c.icon.alt or c.name }}">{% elif c.icon is mapping and c.icon.type == 'text' %}<span>{{ c.icon.value }}</span>{% else %}<span>{{ c.icon }}</span>{% endif %}</div><div><h3>{{ c.name }}</h3><p>{{ c.description }}</p><div class="meta">{{ c.category or 'Automation' }} · v{{ c.version }}</div></div><span class="arrow">→</span></a>{% else %}<div class="empty"><h3>No applications available</h3><p>Your account has no Chiklets assigned through its server-group permissions.</p></div>{% endfor %}</div>{% endblock %}
+diff --git a/docs/CHIKLETS.md b/docs/CHIKLETS.md
+index 2b22b35..c2d91fd 100644
+--- a/docs/CHIKLETS.md
++++ b/docs/CHIKLETS.md
+@@ -1,6 +1,62 @@
+ # Chiklet authoring
+ 
+-Each file under `chiklets/` is one self-service operation. Required top-level keys are `id`, `version`, `name`, `description`, `icon`, `allowed_server_groups`, `form_schema` and `foreman`.
++Each JSON file directly under `chiklets/` is one self-service operation. Required top-level keys are `id`, `version`, `name`, `description`, `icon`, `allowed_server_groups`, `form_schema` and `foreman`.
++
++The catalogue is read from the mounted `chiklets/` directory at request time and each definition is cached by file modification time. Adding, changing or removing a JSON file therefore does not require a container restart or rebuild.
++
++## Server-group scope
++
++Use explicit server-group slugs when a Chiklet is restricted:
++
++```json
++"allowed_server_groups": ["linux-dev", "linux-uat"]
++```
++
++Use the wildcard when the Chiklet is available in every server group:
++
++```json
++"allowed_server_groups": ["*"]
++```
++
++`*` affects Chiklet availability only. It never grants host access. The destination list and submission endpoint still enforce the signed-in user's server-group membership. A global administrator can target any enabled server in a group allowed by the Chiklet. The wildcard must be used by itself; `['*', 'linux-dev']` is rejected as ambiguous configuration.
++
++## Icons and hot-loadable assets
++
++Legacy text/emoji icons continue to work:
++
++```json
++"icon": "DB"
++```
++
++For a local image, place the asset under `chiklets/assets/` and reference it by relative filename:
++
++```text
++chiklets/
++├── install-mssql-odbc-driver.json
++└── assets/
++    └── mssql.svg
++```
++
++```json
++"icon": {
++  "type": "image",
++  "src": "mssql.svg",
++  "alt": "Microsoft SQL Server"
++}
++```
++
++SVG, PNG, JPG/JPEG and WebP are supported. Asset paths are restricted to the Chiklet asset directory and path traversal is rejected. Images are served with no-cache headers so replacing the file is reflected without rebuilding the web image. Existing same-origin absolute paths such as `/static/...` are also accepted, although files added to the image's built-in static directory still require an image rebuild.
++
++A structured text icon is also supported:
++
++```json
++"icon": {
++  "type": "text",
++  "value": "DB"
++}
++```
++
++## Form schema
+ 
+ The form uses JSON Schema Draft 2020-12. The built-in renderer supports strings, integers, numbers, booleans, enums, enum arrays and multiline strings. Backend JSON Schema validation is authoritative.
+ 
+@@ -21,3 +77,40 @@ Example Foreman mapping:
+ ```
+ 
+ The mapping key is the Foreman job-template input name and the value is the Chiklet form property.
++
++## Example: MSSQL ODBC driver
++
++```json
++{
++  "id": "install-mssql-odbc-driver",
++  "version": "1.0.0",
++  "name": "Install MSSQL ODBC Driver",
++  "description": "Install the MSSQL ODBC driver on Linux.",
++  "category": "Database",
++  "allowed_server_groups": ["*"],
++  "icon": {
++    "type": "image",
++    "src": "mssql.svg",
++    "alt": "Microsoft SQL Server"
++  },
++  "form_schema": {
++    "$schema": "https://json-schema.org/draft/2020-12/schema",
++    "type": "object",
++    "properties": {
++      "mssql_odbc_package": {
++        "type": "string",
++        "title": "Package Name",
++        "default": "msodbcsql18-18.1.1.1"
++      }
++    },
++    "required": ["mssql_odbc_package"],
++    "additionalProperties": false
++  },
++  "foreman": {
++    "job_template_name": "SelfService - Install MSSQL ODBC Driver",
++    "input_map": {
++      "mssql_odbc_package": "mssql_odbc_package"
++    }
++  }
++}
++```
+diff --git a/tests/test_chiklet_wildcard_and_assets.py b/tests/test_chiklet_wildcard_and_assets.py
+new file mode 100644
+index 0000000..4dec848
+--- /dev/null
++++ b/tests/test_chiklet_wildcard_and_assets.py
+@@ -0,0 +1,54 @@
++import json
++from pathlib import Path
++from conftest import login
++from app.extensions import db
++from app.models import Server
++
++
++def _install_wildcard_chiklet(app):
++    with app.app_context():
++        base=Path(app.config["CHIKLET_DIRECTORY"])
++        source=json.loads((base/"deploy-web-application.json").read_text(encoding="utf-8"))
++        source["id"]="wildcard-test"
++        source["name"]="Wildcard Test"
++        source["allowed_server_groups"]=["*"]
++        source["icon"]={"type":"image","src":"test.svg","alt":"Test"}
++        (base/"wildcard-test.json").write_text(json.dumps(source),encoding="utf-8")
++        assets=base/"assets"
++        assets.mkdir(exist_ok=True)
++        (assets/"test.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>',encoding="utf-8")
++
++
++def test_wildcard_chiklet_keeps_user_server_rbac(app,client):
++    _install_wildcard_chiklet(app)
++    login(client,"alice")
++    response=client.get("/chiklets/wildcard-test")
++    assert response.status_code==200
++    assert b"demo01" in response.data
++    assert b"secret01" not in response.data
++
++
++def test_wildcard_chiklet_rejects_unauthorised_submission(app,client):
++    _install_wildcard_chiklet(app)
++    login(client,"alice")
++    with app.app_context():
++        secret_id=db.session.scalar(db.select(Server).where(Server.name=="secret01")).id
++    response=client.post("/requests/submit/wildcard-test",data={
++        "server_id":secret_id,
++        "field__application":"payments-api",
++        "field__version":"1.2.3",
++        "field__environment":"UAT",
++        "field__restart_service":"true",
++        "field__healthcheck_path":"/health"
++    })
++    assert response.status_code==403
++
++
++def test_hot_loaded_chiklet_asset_is_served(app,client):
++    _install_wildcard_chiklet(app)
++    login(client,"alice")
++    response=client.get("/chiklet-assets/test.svg")
++    assert response.status_code==200
++    assert response.mimetype=="image/svg+xml"
++    assert b"<svg" in response.data
++    assert "no-cache" in response.headers.get("Cache-Control","")

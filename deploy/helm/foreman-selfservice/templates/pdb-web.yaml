@@ -1,0 +1,15 @@
+{{- if and .Values.web.pdb.enabled (gt (int .Values.web.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "foreman-selfservice.fullname" . }}-web
+  labels:
+    {{- include "foreman-selfservice.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  minAvailable: {{ .Values.web.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "foreman-selfservice.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: web
+{{- end }}

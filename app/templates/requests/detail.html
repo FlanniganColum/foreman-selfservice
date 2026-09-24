@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block content %}
+<a class="back" href="{{ url_for('requests.index') }}">← Request history</a>
+
+<div class="page-heading">
+  <div>
+    <div class="eyebrow">{{ item.request_number }}</div>
+    <h1>{{ item.chiklet_name }}</h1>
+    <p>Target: <strong>{{ item.target_snapshot.name }}</strong></p>
+  </div>
+  <span id="request-status" class="status {{ item.status }}">{{ item.status|replace('_',' ') }}</span>
+</div>
+
+<div class="detail-layout">
+  <section class="card request-card">
+    <h2>Request</h2>
+    <div class="kv-grid">
+      <div><span>Requested by</span><b>{{ item.requested_by.display_name or item.requested_by.username }}</b></div>
+      <div><span>Server group</span><b>{{ item.server_group.name }}</b></div>
+      <div><span>Submitted</span><b>{{ item.submitted_at.strftime('%Y-%m-%d %H:%M:%S') }}</b></div>
+      <div><span>Version</span><b>{{ item.chiklet_version }}</b></div>
+    </div>
+
+    <h3>Parameters</h3>
+    <div class="params">
+      {% for key,value in item.form_data.items() %}
+      <div><span>{{ key|replace('_',' ') }}</span><code>{{ value }}</code></div>
+      {% endfor %}
+    </div>
+
+    {% if item.justification %}
+    <h3>Justification</h3>
+    <p>{{ item.justification }}</p>
+    {% endif %}
+
+    <h3>Approval trail</h3>
+    {% for a in item.approvals %}
+    <div class="timeline-row">
+      <span class="dot"></span>
+      <div>
+        <b>{{ a.decision|title }}</b> by {{ a.approver.display_name or a.approver.username }}
+        <small>{{ a.decided_at.strftime('%Y-%m-%d %H:%M:%S') }}{% if a.comment %} · {{ a.comment }}{% endif %}</small>
+      </div>
+    </div>
+    {% else %}
+    <p class="muted">Awaiting an authorised approver.</p>
+    {% endfor %}
+  </section>
+
+  <section
+    class="card execution-card"
+    data-status-url="{{ url_for('api.request_status',request_id=item.id) }}"
+    data-current-status="{{ item.status }}"
+    data-has-foreman-job="{{ 'true' if item.execution and item.execution.foreman_job_id else 'false' }}"
+  >
+    <div class="execution-heading">
+      <div>
+        <div class="eyebrow">LIVE EXECUTION</div>
+        <h2>Execution</h2>
+        <p class="muted execution-refresh-state" id="execution-refresh-state">Status refresh is active while this request is running.</p>
+      </div>
+      <div class="execution-actions">
+        <button type="button" class="button subtle small" id="toggle-execution-fullscreen">Full screen</button>
+      </div>
+    </div>
+
+    <div class="execution-summary">
+      <div><span>Foreman job</span><b id="foreman-job">{{ item.execution.foreman_job_id if item.execution and item.execution.foreman_job_id else 'Waiting to submit' }}</b></div>
+      <div><span>State</span><b id="execution-state">{{ (item.execution.status_label or item.execution.status) if item.execution else item.status }}</b></div>
+      <div><span>Last status check</span><b id="last-polled">{{ item.execution.last_polled_at if item.execution and item.execution.last_polled_at else 'Not yet polled' }}</b></div>
+    </div>
+
+    <div class="progress-steps" id="execution-steps">
+      <div data-step="submitted" class="done">Request submitted</div>
+      <div data-step="approved" class="{% if item.approved_at %}done{% endif %}">Approved</div>
+      <div data-step="foreman" class="{% if item.execution and item.execution.foreman_job_id %}done{% endif %}">Sent to Foreman</div>
+      <div data-step="ansible" class="{% if item.status == 'running' %}active{% elif item.status in ['succeeded','failed','cancelled'] %}done{% endif %}">Ansible execution</div>
+      <div data-step="completed" class="{% if item.status in ['succeeded','failed','cancelled'] %}done{% endif %}">Completed</div>
+    </div>
+
+    <div id="output-section"{% if not (item.execution and item.execution.foreman_job_id) %} hidden{% endif %}>
+      <div class="output-toolbar">
+        <div>
+          <strong>Foreman output</strong>
+          <span class="muted" id="output-refresh-state">Auto-refreshing while active</span>
+        </div>
+        <div class="output-actions">
+          <span class="muted" id="output-last-refreshed">Not loaded yet</span>
+          <button type="button" class="button subtle small" id="copy-output">Copy</button>
+          <button type="button" class="button subtle small" id="load-output" data-output-url="{{ url_for('api.request_output',request_id=item.id) }}">Refresh now</button>
+        </div>
+      </div>
+      <pre id="job-output" class="job-output" tabindex="0">Waiting for Foreman output…</pre>
+    </div>
+    <div id="output-placeholder" class="output-placeholder muted"{% if item.execution and item.execution.foreman_job_id %} hidden{% endif %}>Foreman output will appear here after the request is approved and submitted.</div>
+
+    {% if item.execution and item.execution.error_message %}
+    <div class="alert danger" id="execution-error">{{ item.execution.error_message }}</div>
+    {% else %}
+    <div class="alert danger" id="execution-error" hidden></div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,282 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 086b1c0..eaef8bf 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,13 @@
+ # Changelog
+ 
++## 1.0.1
++
++- Fixed Celery 5.5 startup failure caused by calling the non-existent `Celery.config_from_mapping` method.
++- Celery is now configured through `celery.conf.update(...)` with broker/backend supplied to the application constructor.
++- Explicitly registers `app.jobs.tasks` so workers recognise execution, recovery and reconciliation tasks at startup.
++- Hardened the readiness probe to use SQLAlchemy `text()` directly.
++- Added detailed TLS/self-signed/enterprise certificate installation and validation documentation.
++
+ ## 1.0.0
+ 
+ - Initial enterprise-oriented Foreman Self-Service Portal build.
+diff --git a/Makefile b/Makefile
+index 173cd73..ae5a76f 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,4 +1,4 @@
+-.PHONY: up down build logs bootstrap sync test
++.PHONY: up down build logs bootstrap sync test tls-info
+ up:
+ 	docker compose up -d --build
+ down:
+@@ -13,3 +13,5 @@ sync:
+ 	docker compose exec web flask --app wsgi:app portal sync-hosts
+ test:
+ 	docker compose run --rm web pytest -q
++tls-info:
++	docker compose exec nginx openssl x509 -in /etc/nginx/certs/fullchain.pem -noout -subject -issuer -dates -ext subjectAltName
+diff --git a/README.md b/README.md
+index 5dbd65f..b7f2d47 100644
+--- a/README.md
++++ b/README.md
+@@ -33,8 +33,8 @@ Browse to `https://localhost`. Nginx creates a self-signed development certifica
+ 
+ Sign in using the bootstrap local account. In **Administration**, assign the account to **Demo Servers**. Sample Chiklets then appear.
+ 
+-## Production TLS
+-Place an enterprise/public CA certificate in `secrets/tls/fullchain.pem` and the private key in `secrets/tls/privkey.pem`. Never use the generated self-signed certificate in production.
++## TLS / HTTPS
++If no certificate is supplied, the Nginx container automatically generates a persistent self-signed development certificate in `secrets/tls/`. For production, place the CA-issued chain in `secrets/tls/fullchain.pem` and matching private key in `secrets/tls/privkey.pem`. See [`docs/TLS.md`](docs/TLS.md) for installation, PFX conversion, validation and client trust instructions.
+ 
+ ## Entra
+ Register `https://<portal-fqdn>/auth/entra/callback` as a web redirect URI. Set `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, and `ENTRA_CLIENT_SECRET`. Auto-provisioned users have no server entitlements until an administrator grants them.
+diff --git a/VALIDATION.md b/VALIDATION.md
+index 75c74b3..1d5dade 100644
+--- a/VALIDATION.md
++++ b/VALIDATION.md
+@@ -7,10 +7,11 @@ Validation performed in the artifact-generation environment:
+ - Jinja template syntax parsing: passed for every `.html` template.
+ - Chiklet JSON parsing: passed for all supplied definitions.
+ - Docker Compose YAML parsing: passed.
++- Celery 5.5 configuration corrected to use the supported `celery.conf` configuration object; task module is explicitly included for worker registration.
+ - Security review: request/server authorization checks are applied server-side; approval enforces separation of duties; status/output APIs repeat authorization checks; external auto-provisioning grants no server group by default.
+ 
+ ## Runtime validation limitation
+ 
+-The artifact-generation environment does **not** include a Docker daemon and blocks outbound Python package downloads. Therefore Docker images could not be built and the pytest suite could not be executed here. Do not interpret this package as already certified for your specific production environment.
++The artifact-generation environment does **not** include a Docker daemon and blocks outbound Python package downloads. Therefore Docker images could not be built and the pytest suite could not be executed here. The original 1.0.0 package was subsequently exercised by a real Docker deployment and exposed the Celery startup defect corrected in 1.0.1.
+ 
+ Before go-live, build the images in CI, run `pytest`, run dependency/container scanners, exercise the real Entra/LDAP/Foreman integrations in non-production, and complete the checklist in `docs/PRODUCTION.md`.
+diff --git a/app/__init__.py b/app/__init__.py
+index 74acf09..dae3ec5 100644
+--- a/app/__init__.py
++++ b/app/__init__.py
+@@ -1,6 +1,7 @@
+ from flask import Flask,render_template
+ from redis import Redis
+ from werkzeug.middleware.proxy_fix import ProxyFix
++from sqlalchemy import text
+ from .config import Config
+ from .extensions import db,migrate,login_manager,csrf,server_session,limiter
+ from .models import User
+@@ -27,7 +28,7 @@ def create_app(config_object=Config):
+     def health_live(): return {"status":"ok"},200
+     @app.get("/health/ready")
+     def health_ready():
+-        try: db.session.execute(db.text("SELECT 1")); return {"status":"ready"},200
++        try: db.session.execute(text("SELECT 1")); return {"status":"ready"},200
+         except Exception: return {"status":"not-ready"},503
+     @app.after_request
+     def security_headers(resp):
+diff --git a/app/jobs/celery_app.py b/app/jobs/celery_app.py
+index 438318e..e29a674 100644
+--- a/app/jobs/celery_app.py
++++ b/app/jobs/celery_app.py
+@@ -1,11 +1,41 @@
+-from celery import Celery,Task
++from celery import Celery, Task
++
++
+ def make_celery(app):
++    """Create and configure Celery so every task runs inside Flask context.
++
++    Celery 5.x stores runtime configuration on ``celery.conf``.  The task
++    module is explicitly included so workers know about execution and
++    reconciliation tasks before the first job is submitted.
++    """
++
+     class FlaskTask(Task):
+-        def __call__(self,*args,**kwargs):
+-            with app.app_context(): return self.run(*args,**kwargs)
+-    celery=Celery(app.import_name,task_cls=FlaskTask)
+-    celery.config_from_mapping(broker_url=app.config["CELERY_BROKER_URL"],result_backend=app.config["CELERY_RESULT_BACKEND"],task_ignore_result=True,timezone="UTC",beat_schedule={
+-            "reconcile-active-foreman-jobs":{"task":"app.jobs.tasks.reconcile_active_jobs","schedule":15.0},
+-            "recover-approved-unsubmitted-jobs":{"task":"app.jobs.tasks.recover_unqueued_requests","schedule":30.0},
+-        })
+-    celery.set_default(); app.extensions["celery"]=celery; return celery
++        def __call__(self, *args, **kwargs):
++            with app.app_context():
++                return self.run(*args, **kwargs)
++
++    celery = Celery(
++        app.import_name,
++        broker=app.config["CELERY_BROKER_URL"],
++        backend=app.config["CELERY_RESULT_BACKEND"],
++        task_cls=FlaskTask,
++        include=["app.jobs.tasks"],
++    )
++    celery.conf.update(
++        task_ignore_result=True,
++        timezone="UTC",
++        enable_utc=True,
++        beat_schedule={
++            "reconcile-active-foreman-jobs": {
++                "task": "app.jobs.tasks.reconcile_active_jobs",
++                "schedule": 15.0,
++            },
++            "recover-approved-unsubmitted-jobs": {
++                "task": "app.jobs.tasks.recover_unqueued_requests",
++                "schedule": 30.0,
++            },
++        },
++    )
++    celery.set_default()
++    app.extensions["celery"] = celery
++    return celery
+diff --git a/docker/nginx/entrypoint.sh b/docker/nginx/entrypoint.sh
+index fcd2965..3f09550 100755
+--- a/docker/nginx/entrypoint.sh
++++ b/docker/nginx/entrypoint.sh
+@@ -2,6 +2,15 @@
+ set -eu
+ mkdir -p /etc/nginx/certs
+ if [ ! -s /etc/nginx/certs/fullchain.pem ] || [ ! -s /etc/nginx/certs/privkey.pem ]; then
+-  echo "No TLS certificate mounted; generating self-signed development certificate."
+-  openssl req -x509 -nodes -newkey rsa:3072 -days 365 -keyout /etc/nginx/certs/privkey.pem -out /etc/nginx/certs/fullchain.pem -subj "/CN=${PORTAL_HOSTNAME:-localhost}" -addext "subjectAltName=DNS:${PORTAL_HOSTNAME:-localhost},DNS:localhost,IP:127.0.0.1"
++  host="${PORTAL_HOSTNAME:-localhost}"
++  san="DNS:${host},DNS:localhost,IP:127.0.0.1"
++  if echo "$host" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
++    san="IP:${host},DNS:localhost,IP:127.0.0.1"
++  fi
++  echo "No TLS certificate mounted; generating self-signed development certificate for ${host}."
++  openssl req -x509 -nodes -newkey rsa:3072 -days 365 \
++    -keyout /etc/nginx/certs/privkey.pem \
++    -out /etc/nginx/certs/fullchain.pem \
++    -subj "/CN=${host}" \
++    -addext "subjectAltName=${san}"
+ fi
+diff --git a/docs/TLS.md b/docs/TLS.md
+new file mode 100644
+index 0000000..fcba128
+--- /dev/null
++++ b/docs/TLS.md
+@@ -0,0 +1,112 @@
++# TLS / HTTPS configuration
++
++The portal terminates HTTPS in the Nginx container and listens on ports 80 and 443. HTTP is redirected to HTTPS.
++
++## Automatic development certificate
++
++If `secrets/tls/fullchain.pem` or `secrets/tls/privkey.pem` is missing when the Nginx container starts, its entrypoint automatically creates a 3072-bit RSA self-signed certificate valid for 365 days.
++
++The certificate uses `PORTAL_HOSTNAME` from `.env` as its primary DNS Subject Alternative Name and also contains `localhost` and `127.0.0.1`. Because `./secrets/tls` is bind-mounted into the Nginx container, the generated files persist on the Docker host.
++
++This fallback is intended for development/test only. Browsers will warn until the self-signed certificate is explicitly trusted.
++
++If you change `PORTAL_HOSTNAME` after a self-signed certificate has already been generated, remove the old `secrets/tls/fullchain.pem` and `secrets/tls/privkey.pem` while the stack is stopped, then start Nginx again so a certificate containing the new hostname is generated.
++
++## Install an organisation/public CA certificate
++
++Nginx expects these exact PEM files:
++
++- `secrets/tls/fullchain.pem` — leaf/server certificate followed by any intermediate CA certificates.
++- `secrets/tls/privkey.pem` — matching unencrypted PEM private key.
++
++Example:
++
++```bash
++mkdir -p secrets/tls
++cp /secure/path/portal-fullchain.pem secrets/tls/fullchain.pem
++cp /secure/path/portal-private-key.pem secrets/tls/privkey.pem
++chmod 644 secrets/tls/fullchain.pem
++chmod 600 secrets/tls/privkey.pem
++```
++
++If the CA provides a leaf certificate and intermediate chain separately, build the full chain with the leaf first:
++
++```bash
++cat portal.crt intermediate-ca.crt > secrets/tls/fullchain.pem
++```
++
++Validate the certificate and key before restarting:
++
++```bash
++openssl x509 -in secrets/tls/fullchain.pem -noout -subject -issuer -dates -ext subjectAltName
++openssl x509 -in secrets/tls/fullchain.pem -pubkey -noout | openssl sha256
++openssl pkey -in secrets/tls/privkey.pem -pubout | openssl sha256
++```
++
++The final two hashes must match.
++
++Then restart Nginx:
++
++```bash
++docker compose up -d nginx
++# or, if already running:
++docker compose restart nginx
++```
++
++Check what Nginx is serving:
++
++```bash
++openssl s_client -connect "${PORTAL_HOSTNAME}:443" -servername "${PORTAL_HOSTNAME}" -showcerts </dev/null
++```
++
++## PKCS#12 / PFX certificates
++
++If your certificate is supplied as `.pfx`/`.p12`, extract the key and certificates into PEM format. Keep the source PFX protected and remove temporary unencrypted key material after installation.
++
++```bash
++openssl pkcs12 -in portal.pfx -nocerts -nodes -out secrets/tls/privkey.pem
++openssl pkcs12 -in portal.pfx -clcerts -nokeys -out /tmp/portal-leaf.pem
++openssl pkcs12 -in portal.pfx -cacerts -nokeys -chain -out /tmp/portal-chain.pem
++cat /tmp/portal-leaf.pem /tmp/portal-chain.pem > secrets/tls/fullchain.pem
++chmod 600 secrets/tls/privkey.pem
++chmod 644 secrets/tls/fullchain.pem
++rm -f /tmp/portal-leaf.pem /tmp/portal-chain.pem
++```
++
++## Trusting the generated self-signed certificate (development/test only)
++
++Copy `secrets/tls/fullchain.pem` to the client machine and add it to that machine's trusted root store.
++
++### Debian / Ubuntu
++
++```bash
++sudo cp fullchain.pem /usr/local/share/ca-certificates/foreman-selfservice.crt
++sudo update-ca-certificates
++```
++
++### RHEL / Rocky / Alma / Fedora
++
++```bash
++sudo cp fullchain.pem /etc/pki/ca-trust/source/anchors/foreman-selfservice.crt
++sudo update-ca-trust
++```
++
++### Windows
++
++Run an elevated command prompt:
++
++```text
++certutil -addstore -f Root fullchain.pem
++```
++
++For enterprise deployment, prefer issuing the portal certificate from your corporate PKI and distribute/trust the corporate root CA through normal endpoint policy instead of trusting an individual self-signed server certificate.
++
++## Entra redirect URI
++
++The Entra application registration must use the same externally visible HTTPS hostname, for example:
++
++```text
++https://portal.example.com/auth/entra/callback
++```
++
++Set both `PORTAL_HOSTNAME=portal.example.com` and `ENTRA_REDIRECT_URI=https://portal.example.com/auth/entra/callback` in `.env`.

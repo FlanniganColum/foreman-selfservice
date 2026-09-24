@@ -1,0 +1,1227 @@
+diff -ruN '--exclude=.git' a/CHANGELOG.md b/CHANGELOG.md
+--- a/CHANGELOG.md	2026-09-16 15:23:45.121249998 +0000
++++ b/CHANGELOG.md	2026-09-16 15:27:52.651963346 +0000
+@@ -1,5 +1,16 @@
+ # Changelog
+ 
++## 1.0.5
++
++- Made the Chiklet JSON Schema the authoritative source for end-user deployment customisation.
++- Added generic GUI rendering for dropdowns/enums, booleans, numeric fields, multi-selects, text areas, dates and date/time fields.
++- Defaults remain editable unless a field is explicitly marked `readOnly: true`.
++- Added `x-ui` presentation hints for form groups, ordering, widths, placeholders, help text and enum display labels.
++- Enforced read-only values server-side so browser tampering cannot override policy-owned configuration.
++- Added validation that every `foreman.input_map` source references a real `form_schema.properties` field.
++- Invalid form submissions are re-rendered with the user's valid selections preserved.
++- Added Chiklet schema authoring documentation and regression tests for schema-driven forms and tamper resistance.
++
+ ## 1.0.4
+ 
+ - Expanded the request Execution area into a full-width analysis workspace.
+diff -ruN '--exclude=.git' a/README.md b/README.md
+--- a/README.md	2026-09-16 15:23:44.681240912 +0000
++++ b/README.md	2026-09-16 15:27:52.652106412 +0000
+@@ -46,7 +46,9 @@
+ Set `FOREMAN_MOCK=false`, configure `FOREMAN_URL`, and use a least-privilege API identity. For a Foreman Personal Access Token, set both `FOREMAN_USERNAME` and `FOREMAN_API_TOKEN`; Foreman authenticates PATs as HTTP Basic username/token credentials. Leave TLS verification enabled. Job invocation/status code is isolated in `app/foreman/client.py` because Foreman API details can vary by version.
+ 
+ ## Chiklets
+-Add JSON files under `chiklets/`. Each includes metadata, allowed server-group slugs, a Draft 2020-12 JSON Schema and a mapping from form field names to Foreman job-template inputs. The definition is snapshotted at request time.
++Add JSON files under `chiklets/`. Each includes metadata, allowed server-group slugs, a Draft 2020-12 JSON Schema and a mapping from form field names to Foreman job-template inputs. The schema dynamically builds the end-user form: enums become dropdowns, booleans become toggles, numbers become numeric inputs, and defaults are editable unless `readOnly: true`. Submitted values are validated against the same schema and snapshotted at request time.
++
++See `docs/CHIKLETS.md` for the complete schema/UI reference and examples.
+ 
+ ## Tests
+ ```bash
+diff -ruN '--exclude=.git' a/app/catalog/routes.py b/app/catalog/routes.py
+--- a/app/catalog/routes.py	2026-09-16 15:00:08.966151249 +0000
++++ b/app/catalog/routes.py	2026-09-16 15:28:47.404350414 +0000
+@@ -1,36 +1,46 @@
+ from pathlib import Path
+-from flask import Blueprint,abort,current_app,render_template,send_from_directory
+-from flask_login import login_required,current_user
+-from ..extensions import db
+-from ..models import Server
+-from .service import list_chiklets,get_chiklet,can_user_access_chiklet,can_user_target_server
++from flask import Blueprint, abort, current_app, render_template, send_from_directory
++from flask_login import login_required, current_user
++from .service import (
++    list_chiklets,
++    get_chiklet,
++    can_user_access_chiklet,
++    build_form_layout,
++    authorised_servers,
++)
++
++bp = Blueprint("catalog", __name__)
+ 
+-bp=Blueprint("catalog",__name__)
+ 
+ @bp.get("/")
+ @login_required
+ def index():
+-    return render_template("catalog/index.html",chiklets=[x for x in list_chiklets() if can_user_access_chiklet(current_user,x)])
++    return render_template("catalog/index.html", chiklets=[x for x in list_chiklets() if can_user_access_chiklet(current_user, x)])
++
+ 
+ @bp.get("/chiklets/<chiklet_id>")
+ @login_required
+ def detail(chiklet_id):
+-    chiklet=get_chiklet(chiklet_id)
+-    if not chiklet or not can_user_access_chiklet(current_user,chiklet):
++    chiklet = get_chiklet(chiklet_id)
++    if not chiklet or not can_user_access_chiklet(current_user, chiklet):
+         abort(404)
+-    servers=db.session.scalars(db.select(Server).where(Server.enabled.is_(True)).order_by(Server.name)).all()
+-    servers=[s for s in servers if can_user_target_server(current_user,chiklet,s)]
+-    return render_template("catalog/detail.html",chiklet=chiklet,servers=servers)
++    return render_template(
++        "catalog/detail.html",
++        chiklet=chiklet,
++        servers=authorised_servers(current_user, chiklet),
++        form_layout=build_form_layout(chiklet),
++    )
++
+ 
+ @bp.get("/chiklet-assets/<path:filename>")
+ @login_required
+ def asset(filename):
+-    suffix=Path(filename).suffix.lower()
+-    if suffix not in {".svg",".png",".jpg",".jpeg",".webp"}:
++    suffix = Path(filename).suffix.lower()
++    if suffix not in {".svg", ".png", ".jpg", ".jpeg", ".webp"}:
+         abort(404)
+-    asset_dir=Path(current_app.config["CHIKLET_DIRECTORY"])/"assets"
+-    response=send_from_directory(asset_dir,filename,conditional=True,max_age=0)
+-    response.headers["Cache-Control"]="no-cache, no-store, must-revalidate"
+-    response.headers["Content-Security-Policy"]="default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox"
+-    response.headers["X-Content-Type-Options"]="nosniff"
++    asset_dir = Path(current_app.config["CHIKLET_DIRECTORY"]) / "assets"
++    response = send_from_directory(asset_dir, filename, conditional=True, max_age=0)
++    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
++    response.headers["Content-Security-Policy"] = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox"
++    response.headers["X-Content-Type-Options"] = "nosniff"
+     return response
+diff -ruN '--exclude=.git' a/app/catalog/service.py b/app/catalog/service.py
+--- a/app/catalog/service.py	2026-09-16 15:00:08.966209738 +0000
++++ b/app/catalog/service.py	2026-09-16 15:28:47.404131303 +0000
+@@ -3,116 +3,263 @@
+ from functools import lru_cache
+ from flask import current_app
+ from jsonschema import Draft202012Validator
++from ..extensions import db
++from ..models import Server
++
+ 
+ class ChikletError(ValueError):
+     pass
+ 
++
++SUPPORTED_WIDGETS = {
++    "text",
++    "textarea",
++    "select",
++    "multiselect",
++    "toggle",
++    "number",
++    "date",
++    "datetime-local",
++}
++
++
+ @lru_cache(maxsize=256)
+-def _load_file_cached(path,mtime_ns):
+-    with open(path,"r",encoding="utf-8") as f:
+-        data=json.load(f)
+-    _validate_definition(data,path)
++def _load_file_cached(path, mtime_ns):
++    with open(path, "r", encoding="utf-8") as f:
++        data = json.load(f)
++    _validate_definition(data, path)
+     return data
+ 
+-def _validate_definition(data,source=""):
+-    required={"id","version","name","description","icon","allowed_server_groups","form_schema","foreman"}
+-    missing=sorted(required-set(data))
++
++def _validate_definition(data, source=""):
++    required = {"id", "version", "name", "description", "icon", "allowed_server_groups", "form_schema", "foreman"}
++    missing = sorted(required - set(data))
+     if missing:
+         raise ChikletError(f"{source}: missing keys: {', '.join(missing)}")
+ 
+-    allowed_groups=data.get("allowed_server_groups")
+-    if not isinstance(allowed_groups,list) or not allowed_groups or not all(isinstance(x,str) and x.strip() for x in allowed_groups):
++    allowed_groups = data.get("allowed_server_groups")
++    if not isinstance(allowed_groups, list) or not allowed_groups or not all(isinstance(x, str) and x.strip() for x in allowed_groups):
+         raise ChikletError(f"{source}: allowed_server_groups must be a non-empty list of group slugs or ['*']")
+     if "*" in allowed_groups and allowed_groups != ["*"]:
+         raise ChikletError(f"{source}: wildcard '*' must be the only entry in allowed_server_groups")
+ 
+-    icon=data.get("icon")
+-    if isinstance(icon,str):
++    icon = data.get("icon")
++    if isinstance(icon, str):
+         if not icon.strip():
+             raise ChikletError(f"{source}: icon cannot be empty")
+-    elif isinstance(icon,dict):
+-        icon_type=icon.get("type")
+-        if icon_type=="image":
+-            src=icon.get("src")
+-            if not isinstance(src,str) or not src.strip():
++    elif isinstance(icon, dict):
++        icon_type = icon.get("type")
++        if icon_type == "image":
++            src = icon.get("src")
++            if not isinstance(src, str) or not src.strip():
+                 raise ChikletError(f"{source}: image icon requires a non-empty src")
+             if not src.startswith("/"):
+-                path=Path(src)
++                path = Path(src)
+                 if path.is_absolute() or ".." in path.parts:
+                     raise ChikletError(f"{source}: image icon src must be relative to chiklets/assets and cannot traverse directories")
+-                if path.suffix.lower() not in {".svg",".png",".jpg",".jpeg",".webp"}:
++                if path.suffix.lower() not in {".svg", ".png", ".jpg", ".jpeg", ".webp"}:
+                     raise ChikletError(f"{source}: unsupported image icon extension {path.suffix!r}")
+-        elif icon_type=="text":
+-            value=icon.get("value")
+-            if not isinstance(value,str) or not value.strip():
++        elif icon_type == "text":
++            value = icon.get("value")
++            if not isinstance(value, str) or not value.strip():
+                 raise ChikletError(f"{source}: text icon requires a non-empty value")
+         else:
+             raise ChikletError(f"{source}: icon.type must be 'image' or 'text'")
+     else:
+         raise ChikletError(f"{source}: icon must be a string or an icon object")
+ 
+-    Draft202012Validator.check_schema(data["form_schema"])
+-    for field_name,spec in data["form_schema"].get("properties",{}).items():
+-        if spec.get("format") in {"password","secret"} or spec.get("x-sensitive") is True:
+-            raise ChikletError(f"{source}: raw secret field {field_name!r} is not permitted; use a secret reference resolved by Foreman/Vault instead")
+-    if "job_template_id" not in data["foreman"] and "job_template_name" not in data["foreman"]:
++    schema = data["form_schema"]
++    Draft202012Validator.check_schema(schema)
++    if schema.get("type") != "object":
++        raise ChikletError(f"{source}: form_schema.type must be 'object'")
++    properties = schema.get("properties") or {}
++    if not isinstance(properties, dict):
++        raise ChikletError(f"{source}: form_schema.properties must be an object")
++
++    for field_name, spec in properties.items():
++        if spec.get("format") in {"password", "secret"} or spec.get("x-sensitive") is True:
++            raise ChikletError(
++                f"{source}: raw secret field {field_name!r} is not permitted; "
++                "use a secret reference resolved by Foreman/Vault instead"
++            )
++        ui = spec.get("x-ui") or {}
++        if not isinstance(ui, dict):
++            raise ChikletError(f"{source}: {field_name}.x-ui must be an object")
++        widget = ui.get("widget")
++        if widget and widget not in SUPPORTED_WIDGETS:
++            raise ChikletError(
++                f"{source}: {field_name}.x-ui.widget {widget!r} is unsupported; "
++                f"use one of {', '.join(sorted(SUPPORTED_WIDGETS))}"
++            )
++        if "order" in ui and not isinstance(ui["order"], (int, float)):
++            raise ChikletError(f"{source}: {field_name}.x-ui.order must be numeric")
++        if ui.get("width", "full") not in {"full", "half"}:
++            raise ChikletError(f"{source}: {field_name}.x-ui.width must be 'full' or 'half'")
++        if "enum_labels" in ui and not isinstance(ui["enum_labels"], dict):
++            raise ChikletError(f"{source}: {field_name}.x-ui.enum_labels must be an object")
++        if spec.get("readOnly") is True and "default" not in spec:
++            raise ChikletError(f"{source}: readOnly field {field_name!r} requires a default value")
++
++    foreman = data["foreman"]
++    if "job_template_id" not in foreman and "job_template_name" not in foreman:
+         raise ChikletError(f"{source}: foreman job template is required")
+ 
++    input_map = foreman.get("input_map", {})
++    if not isinstance(input_map, dict):
++        raise ChikletError(f"{source}: foreman.input_map must be an object")
++    for foreman_name, source_name in input_map.items():
++        if not isinstance(foreman_name, str) or not foreman_name.strip() or not isinstance(source_name, str) or not source_name.strip():
++            raise ChikletError(f"{source}: foreman.input_map keys and values must be non-empty strings")
++    unknown_sources = sorted({source_name for source_name in input_map.values() if source_name not in properties})
++    if unknown_sources:
++        raise ChikletError(
++            f"{source}: foreman.input_map references fields not present in form_schema.properties: "
++            f"{', '.join(unknown_sources)}"
++        )
++
++
+ def list_chiklets():
+-    base=Path(current_app.config["CHIKLET_DIRECTORY"])
+-    return [_load_file_cached(str(p),p.stat().st_mtime_ns) for p in sorted(base.glob("*.json"))]
++    base = Path(current_app.config["CHIKLET_DIRECTORY"])
++    return [_load_file_cached(str(p), p.stat().st_mtime_ns) for p in sorted(base.glob("*.json"))]
++
+ 
+ def get_chiklet(chiklet_id):
+-    return next((x for x in list_chiklets() if x["id"]==chiklet_id),None)
++    return next((x for x in list_chiklets() if x["id"] == chiklet_id), None)
+ 
+-def chiklet_allows_group(chiklet,group_slug):
+-    allowed=set(chiklet.get("allowed_server_groups",[]))
++
++def chiklet_allows_group(chiklet, group_slug):
++    allowed = set(chiklet.get("allowed_server_groups", []))
+     return "*" in allowed or group_slug in allowed
+ 
+-def can_user_access_chiklet(user,chiklet):
++
++def can_user_access_chiklet(user, chiklet):
+     if user.is_global_admin():
+         return True
+-    user_groups={g.slug for g in user.server_groups if g.enabled}
+-    allowed=set(chiklet.get("allowed_server_groups",[]))
++    user_groups = {g.slug for g in user.server_groups if g.enabled}
++    allowed = set(chiklet.get("allowed_server_groups", []))
+     if "*" in allowed:
+         return bool(user_groups)
+     return bool(allowed & user_groups)
+ 
+-def can_user_target_server(user,chiklet,server):
++
++def can_user_target_server(user, chiklet, server):
+     if not server or not server.enabled or not server.group or not server.group.enabled:
+         return False
+-    if not chiklet_allows_group(chiklet,server.group.slug):
++    if not chiklet_allows_group(chiklet, server.group.slug):
+         return False
+     if user.is_global_admin():
+         return True
+-    return any(g.enabled and g.id==server.group_id for g in user.server_groups)
++    return any(g.enabled and g.id == server.group_id for g in user.server_groups)
++
+ 
+-def field_value_from_request(prop,spec,form):
+-    raw=form.get(f"field__{prop}")
+-    t=spec.get("type")
+-    if t=="boolean":
+-        return raw in {"1","true","on","yes"}
+-    if t=="integer":
+-        return int(raw) if raw not in (None,"") else None
+-    if t=="number":
+-        return float(raw) if raw not in (None,"") else None
+-    if t=="array":
++def authorised_servers(user, chiklet):
++    servers = db.session.scalars(db.select(Server).where(Server.enabled.is_(True)).order_by(Server.name)).all()
++    return [server for server in servers if can_user_target_server(user, chiklet, server)]
++
++
++def _infer_widget(spec):
++    ui = spec.get("x-ui") or {}
++    if ui.get("widget"):
++        return ui["widget"]
++    if spec.get("enum") is not None:
++        return "select"
++    if spec.get("type") == "boolean":
++        return "toggle"
++    if spec.get("type") == "array" and (spec.get("items") or {}).get("enum") is not None:
++        return "multiselect"
++    if spec.get("type") in {"integer", "number"}:
++        return "number"
++    if spec.get("format") == "date":
++        return "date"
++    if spec.get("format") == "date-time":
++        return "datetime-local"
++    if spec.get("format") in {"multiline", "textarea"}:
++        return "textarea"
++    return "text"
++
++
++def _enum_options(spec):
++    values = spec.get("enum")
++    if values is None and spec.get("type") == "array":
++        values = (spec.get("items") or {}).get("enum")
++    values = values or []
++    labels = (spec.get("x-ui") or {}).get("enum_labels") or {}
++    return [{"value": value, "label": labels.get(str(value), str(value))} for value in values]
++
++
++def build_form_layout(chiklet, values=None):
++    """Convert a Chiklet JSON Schema into presentation metadata for the GUI.
++
++    JSON Schema remains authoritative for validation; x-ui only controls presentation.
++    Defaults are editable unless readOnly=true.
++    """
++    schema = chiklet["form_schema"]
++    required = set(schema.get("required", []))
++    values = values or {}
++    groups = {}
++
++    for index, (name, spec) in enumerate(schema.get("properties", {}).items()):
++        ui = spec.get("x-ui") or {}
++        group_name = ui.get("group") or "Configuration"
++        current = values[name] if name in values else spec.get("default")
++        field = {
++            "name": name,
++            "spec": spec,
++            "title": spec.get("title") or name.replace("_", " ").title(),
++            "description": spec.get("description"),
++            "help": ui.get("help"),
++            "placeholder": ui.get("placeholder", spec.get("placeholder", "")),
++            "required": name in required,
++            "readonly": spec.get("readOnly") is True,
++            "widget": _infer_widget(spec),
++            "options": _enum_options(spec),
++            "value": current,
++            "order": ui.get("order", index),
++            "width": ui.get("width", "full"),
++        }
++        groups.setdefault(group_name, []).append(field)
++
++    result = []
++    for group_index, (group_name, fields) in enumerate(groups.items()):
++        fields.sort(key=lambda field: (field["order"], field["title"]))
++        result.append({"name": group_name, "order": min((f["order"] for f in fields), default=group_index), "fields": fields})
++    result.sort(key=lambda group: group["order"])
++    return result
++
++
++def field_value_from_request(prop, spec, form):
++    # Read-only fields are configuration owned by the Chiklet. Never trust a
++    # browser-supplied value for them, even if a user tampers with the HTML.
++    if spec.get("readOnly") is True:
++        return spec.get("default")
++
++    raw = form.get(f"field__{prop}")
++    t = spec.get("type")
++    if t == "boolean":
++        return raw in {"1", "true", "on", "yes"}
++    if t == "integer":
++        return int(raw) if raw not in (None, "") else None
++    if t == "number":
++        return float(raw) if raw not in (None, "") else None
++    if t == "array":
+         return form.getlist(f"field__{prop}")
+     return raw
+ 
+-def validate_form(chiklet,form):
+-    schema=chiklet["form_schema"]
+-    data={}
+-    errors=[]
+-    for prop,spec in schema.get("properties",{}).items():
++
++def validate_form(chiklet, form):
++    schema = chiklet["form_schema"]
++    data = {}
++    errors = []
++    for prop, spec in schema.get("properties", {}).items():
+         try:
+-            value=field_value_from_request(prop,spec,form)
+-            if value not in (None,"",[]):
+-                data[prop]=value
++            value = field_value_from_request(prop, spec, form)
++            if value not in (None, "", []):
++                data[prop] = value
+             elif "default" in spec:
+-                data[prop]=spec["default"]
+-        except (TypeError,ValueError):
+-            errors.append(f"{spec.get('title',prop)} has an invalid value")
+-    for e in sorted(Draft202012Validator(schema).iter_errors(data),key=lambda x:list(x.path)):
+-        errors.append(f"{'.'.join(map(str,e.path)) or 'Form'}: {e.message}")
+-    return data,errors
++                data[prop] = spec["default"]
++        except (TypeError, ValueError):
++            errors.append(f"{spec.get('title', prop)} has an invalid value")
++
++    for error in sorted(Draft202012Validator(schema).iter_errors(data), key=lambda x: list(x.path)):
++        errors.append(f"{'.'.join(map(str, error.path)) or 'Form'}: {error.message}")
++    return data, errors
+diff -ruN '--exclude=.git' a/app/requests/routes.py b/app/requests/routes.py
+--- a/app/requests/routes.py	2026-09-16 15:00:08.966247555 +0000
++++ b/app/requests/routes.py	2026-09-16 15:28:47.404401191 +0000
+@@ -1,52 +1,115 @@
+-from datetime import datetime,timezone
++from datetime import datetime, timezone
+ import secrets
+-from flask import Blueprint,abort,flash,redirect,render_template,request,url_for
+-from flask_login import login_required,current_user
++from flask import Blueprint, abort, flash, redirect, render_template, request, url_for
++from flask_login import login_required, current_user
+ from ..extensions import db
+-from ..models import DeploymentRequest,Server,RequestStatus
+-from ..catalog.service import get_chiklet,can_user_access_chiklet,can_user_target_server,validate_form
++from ..models import DeploymentRequest, Server, RequestStatus
++from ..catalog.service import (
++    get_chiklet,
++    can_user_access_chiklet,
++    can_user_target_server,
++    validate_form,
++    build_form_layout,
++    authorised_servers,
++)
+ from ..audit.service import audit
+-bp=Blueprint("requests",__name__,url_prefix="/requests")
+-def _request_number(): return f"REQ-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{secrets.token_hex(6).upper()}"
++
++bp = Blueprint("requests", __name__, url_prefix="/requests")
++
++
++def _request_number():
++    return f"REQ-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{secrets.token_hex(6).upper()}"
++
+ 
+ @bp.post("/submit/<chiklet_id>")
+ @login_required
+ def submit(chiklet_id):
+-    chiklet=get_chiklet(chiklet_id)
+-    if not chiklet or not can_user_access_chiklet(current_user,chiklet): abort(403)
+-    try: server_id=int(request.form.get("server_id",""))
+-    except ValueError: abort(400)
+-    server=db.session.get(Server,server_id)
+-    if not server or not server.enabled or not server.group: abort(400)
+-    if not can_user_target_server(current_user,chiklet,server): abort(403)
+-    form_data,errors=validate_form(chiklet,request.form)
++    chiklet = get_chiklet(chiklet_id)
++    if not chiklet or not can_user_access_chiklet(current_user, chiklet):
++        abort(403)
++    try:
++        server_id = int(request.form.get("server_id", ""))
++    except ValueError:
++        abort(400)
++    server = db.session.get(Server, server_id)
++    if not server or not server.enabled or not server.group:
++        abort(400)
++    if not can_user_target_server(current_user, chiklet, server):
++        abort(403)
++
++    form_data, errors = validate_form(chiklet, request.form)
+     if errors:
+-        for e in errors: flash(e,"danger")
+-        return redirect(url_for("catalog.detail",chiklet_id=chiklet_id))
+-    item=DeploymentRequest(request_number=_request_number(),requested_by_id=current_user.id,chiklet_id=chiklet["id"],chiklet_name=chiklet["name"],chiklet_version=chiklet["version"],server_group_id=server.group_id,status=RequestStatus.PENDING_APPROVAL.value,justification=request.form.get("justification","").strip() or None,form_data=form_data,config_snapshot=chiklet,target_snapshot={"server_id":server.id,"foreman_host_id":server.foreman_host_id,"name":server.name,"ip_address":server.ip_address,"server_group_id":server.group_id,"server_group_slug":server.group.slug})
+-    db.session.add(item); db.session.flush(); audit("REQUEST_SUBMITTED",entity_type="deployment_request",entity_id=item.id,details={"request_number":item.request_number,"chiklet":item.chiklet_id,"server":server.name}); db.session.commit()
+-    flash(f"{item.request_number} submitted for approval.","success"); return redirect(url_for("requests.detail",request_id=item.id))
++        for error in errors:
++            flash(error, "danger")
++        return (
++            render_template(
++                "catalog/detail.html",
++                chiklet=chiklet,
++                servers=authorised_servers(current_user, chiklet),
++                form_layout=build_form_layout(chiklet, form_data),
++                selected_server_id=server.id,
++                justification=request.form.get("justification", ""),
++            ),
++            400,
++        )
++
++    item = DeploymentRequest(
++        request_number=_request_number(),
++        requested_by_id=current_user.id,
++        chiklet_id=chiklet["id"],
++        chiklet_name=chiklet["name"],
++        chiklet_version=chiklet["version"],
++        server_group_id=server.group_id,
++        status=RequestStatus.PENDING_APPROVAL.value,
++        justification=request.form.get("justification", "").strip() or None,
++        form_data=form_data,
++        config_snapshot=chiklet,
++        target_snapshot={
++            "server_id": server.id,
++            "foreman_host_id": server.foreman_host_id,
++            "name": server.name,
++            "ip_address": server.ip_address,
++            "server_group_id": server.group_id,
++            "server_group_slug": server.group.slug,
++        },
++    )
++    db.session.add(item)
++    db.session.flush()
++    audit(
++        "REQUEST_SUBMITTED",
++        entity_type="deployment_request",
++        entity_id=item.id,
++        details={"request_number": item.request_number, "chiklet": item.chiklet_id, "server": server.name},
++    )
++    db.session.commit()
++    flash(f"{item.request_number} submitted for approval.", "success")
++    return redirect(url_for("requests.detail", request_id=item.id))
++
+ 
+ @bp.get("/")
+ @login_required
+ def index():
+-    stmt=db.select(DeploymentRequest).order_by(DeploymentRequest.created_at.desc())
+-    if current_user.role not in {"global_admin","admin","auditor","approver"}:
+-        stmt=stmt.where(DeploymentRequest.requested_by_id==current_user.id)
+-        items=db.session.scalars(stmt.limit(200)).all()
+-    elif current_user.role=="approver":
+-        items=db.session.scalars(stmt.limit(500)).all()
+-        gids={g.id for g in current_user.approval_groups}
+-        items=[x for x in items if x.requested_by_id==current_user.id or x.server_group_id in gids][:200]
++    stmt = db.select(DeploymentRequest).order_by(DeploymentRequest.created_at.desc())
++    if current_user.role not in {"global_admin", "admin", "auditor", "approver"}:
++        stmt = stmt.where(DeploymentRequest.requested_by_id == current_user.id)
++        items = db.session.scalars(stmt.limit(200)).all()
++    elif current_user.role == "approver":
++        items = db.session.scalars(stmt.limit(500)).all()
++        gids = {g.id for g in current_user.approval_groups}
++        items = [x for x in items if x.requested_by_id == current_user.id or x.server_group_id in gids][:200]
+     else:
+-        items=db.session.scalars(stmt.limit(200)).all()
+-    return render_template("requests/index.html",requests=items)
++        items = db.session.scalars(stmt.limit(200)).all()
++    return render_template("requests/index.html", requests=items)
++
+ 
+ @bp.get("/<request_id>")
+ @login_required
+ def detail(request_id):
+-    item=db.session.get(DeploymentRequest,request_id)
+-    if not item: abort(404)
+-    if item.requested_by_id!=current_user.id and current_user.role not in {"global_admin","admin","auditor","approver"}: abort(403)
+-    if current_user.role=="approver" and item.requested_by_id!=current_user.id and not current_user.can_approve_group(item.server_group_id): abort(403)
+-    return render_template("requests/detail.html",item=item)
++    item = db.session.get(DeploymentRequest, request_id)
++    if not item:
++        abort(404)
++    if item.requested_by_id != current_user.id and current_user.role not in {"global_admin", "admin", "auditor", "approver"}:
++        abort(403)
++    if current_user.role == "approver" and item.requested_by_id != current_user.id and not current_user.can_approve_group(item.server_group_id):
++        abort(403)
++    return render_template("requests/detail.html", item=item)
+diff -ruN '--exclude=.git' a/app/static/css/app.css b/app/static/css/app.css
+--- a/app/static/css/app.css	2026-09-16 15:03:52.446544020 +0000
++++ b/app/static/css/app.css	2026-09-16 15:26:36.727946459 +0000
+@@ -7,3 +7,7 @@
+ /* v1.0.4 execution workspace */
+ .request-card,.execution-card{grid-column:1/-1}.execution-card{position:relative;top:auto;align-self:stretch}.execution-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:18px}.execution-heading h2{margin:5px 0 6px;color:var(--navy);font-size:28px}.execution-refresh-state{margin:0}.execution-actions,.output-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.execution-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:16px 0 22px}.execution-summary>div{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:#f9fbfd}.execution-summary span{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}.execution-summary b{display:block;overflow-wrap:anywhere}.execution-card .progress-steps{grid-template-columns:repeat(5,minmax(120px,1fr));gap:0;margin:20px 0 26px;overflow-x:auto}.execution-card .progress-steps div{border-left:0;border-top:4px solid #d9e2ea;padding:12px 12px 10px;min-width:120px}.execution-card .progress-steps .done{border-color:var(--green);background:#f7fcfa;color:#245c49}.execution-card .progress-steps .active{border-color:var(--blue);background:#f0f7fd;color:var(--blue)}.execution-card .progress-steps .failed{border-color:var(--red);background:#fff6f6;color:#9c2e2e}.output-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;padding-top:4px}.output-toolbar>div:first-child{display:grid;gap:3px}.output-toolbar strong{color:var(--navy)}.job-output{white-space:pre;word-break:normal;background:#0d2338;color:#dbe9f5;border:1px solid #1b405f;border-radius:12px;padding:18px;margin-top:12px;min-height:520px;height:58vh;max-height:72vh;overflow:auto;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-size:13px;line-height:1.55;tab-size:4;box-shadow:inset 0 0 0 1px rgba(255,255,255,.02)}.job-output:focus{outline:3px solid rgba(11,105,183,.18)}.output-placeholder{border:1px dashed #bacbd9;border-radius:12px;padding:34px;text-align:center;background:#f9fbfd;margin-top:12px}.execution-card.fullscreen{position:fixed;inset:18px;z-index:1000;margin:0;overflow:auto;box-shadow:0 24px 80px rgba(8,35,58,.28);border-radius:16px}.execution-card.fullscreen .job-output{height:calc(100vh - 330px);max-height:none;min-height:360px;resize:none}body.execution-fullscreen-open{overflow:hidden}.status.cancelled{background:#f3e7fa;color:#71408a}
+ @media(max-width:900px){.execution-summary{grid-template-columns:1fr}.execution-heading,.output-toolbar{align-items:stretch;flex-direction:column}.output-actions{justify-content:flex-start}.execution-card .progress-steps{grid-template-columns:1fr}.execution-card .progress-steps div{border-top:0;border-left:4px solid #d9e2ea}.job-output{height:55vh;min-height:420px}.execution-card.fullscreen{inset:8px}.execution-card.fullscreen .job-output{height:calc(100vh - 390px)}}
++
++/* v1.0.5 schema-driven Chiklet forms */
++.schema-intro{margin:10px 0 2px;color:var(--muted);line-height:1.55}.schema-form{gap:20px}.form-section{border:1px solid var(--line);border-radius:14px;padding:18px;margin:0;background:#fbfdff}.form-section legend{font-weight:800;color:var(--navy);font-size:15px;padding:0 8px}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.schema-field{align-content:start}.schema-field:not(.schema-field-half){grid-column:1/-1}.schema-field-half{grid-column:auto}.schema-field-title{display:flex;align-items:center;gap:7px}.field-badge{display:inline-flex;align-items:center;border-radius:999px;padding:2px 7px;background:#edf2f6;color:#667b8d;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}.readonly-control,input:disabled,select:disabled,textarea:disabled{background:#f1f5f8;color:#5d7183;cursor:not-allowed}.schema-field select[multiple]{min-height:126px}.field-help{display:block;color:#4e6b83}.schema-field input[type=checkbox]{accent-color:var(--blue)}
++@media(max-width:760px){.form-grid{grid-template-columns:1fr}.schema-field,.schema-field-half{grid-column:1/-1}}
+diff -ruN '--exclude=.git' a/app/templates/catalog/detail.html b/app/templates/catalog/detail.html
+--- a/app/templates/catalog/detail.html	2026-09-16 15:00:08.966402118 +0000
++++ b/app/templates/catalog/detail.html	2026-09-16 15:26:36.727946459 +0000
+@@ -1,12 +1,166 @@
+-{% extends "base.html" %}{% block content %}<a class="back" href="{{ url_for('catalog.index') }}">← Application catalogue</a><div class="detail-layout"><section class="card"><div class="eyebrow">{{ chiklet.category or 'AUTOMATION' }}</div><h1>{{ chiklet.name }}</h1><p class="lede">{{ chiklet.description }}</p><form method="post" action="{{ url_for('requests.submit',chiklet_id=chiklet.id) }}" class="stack"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+-{% for name,spec in chiklet.form_schema.properties.items() %}<label>{{ spec.title or name }}{% if name in chiklet.form_schema.get('required',[]) %}<b>*</b>{% endif %}
+-{% if spec.type == 'boolean' %}<span class="toggle-row"><input type="checkbox" name="field__{{ name }}" value="true" {% if spec.default %}checked{% endif %}> Enable</span>
+-{% elif spec.enum %}<select name="field__{{ name }}" {% if name in chiklet.form_schema.get('required',[]) %}required{% endif %}><option value="">Select…</option>{% for option in spec.enum %}<option value="{{ option }}" {% if spec.default == option %}selected{% endif %}>{{ option }}</option>{% endfor %}</select>
+-{% elif spec.type == 'integer' %}<input type="number" name="field__{{ name }}" value="{{ spec.default if spec.default is defined else '' }}" {% if spec.minimum is defined %}min="{{ spec.minimum }}"{% endif %} {% if spec.maximum is defined %}max="{{ spec.maximum }}"{% endif %}>
+-{% elif spec.type == 'array' and spec.items and spec.items.enum %}<select name="field__{{ name }}" multiple>{% for option in spec.items.enum %}<option value="{{ option }}">{{ option }}</option>{% endfor %}</select>
+-{% elif spec.format == 'multiline' %}<textarea name="field__{{ name }}" rows="4">{{ spec.default if spec.default is defined else '' }}</textarea>
+-{% else %}<input name="field__{{ name }}" value="{{ spec.default if spec.default is defined else '' }}" placeholder="{{ spec.placeholder or '' }}" {% if name in chiklet.form_schema.get('required',[]) %}required{% endif %}>{% endif %}
+-{% if spec.description %}<small>{{ spec.description }}</small>{% endif %}</label>{% endfor %}
+-<label>Destination server<select name="server_id" required><option value="">Select an authorised server…</option>{% for s in servers %}<option value="{{ s.id }}">{{ s.name }}{% if s.ip_address %} · {{ s.ip_address }}{% endif %} · {{ s.group.name }}</option>{% endfor %}</select><small>The server list is filtered by both your entitlements and this Chiklet's allowed groups.</small></label>
+-<label>Business / change justification<textarea name="justification" rows="3" placeholder="Change reference, deployment purpose, incident reference…"></textarea></label><div class="callout">Submitting creates an immutable request for approval. No Foreman API job is started until an authorised approver accepts it.</div><button class="button primary">Submit for approval</button></form></section>
+-<aside class="card side-card"><div class="big-icon">{% if chiklet.icon is mapping and chiklet.icon.type == 'image' %}<img src="{% if chiklet.icon.src.startswith('/') %}{{ chiklet.icon.src }}{% else %}{{ url_for('catalog.asset',filename=chiklet.icon.src) }}{% endif %}" alt="{{ chiklet.icon.alt or chiklet.name }}">{% elif chiklet.icon is mapping and chiklet.icon.type == 'text' %}<span>{{ chiklet.icon.value }}</span>{% else %}<span>{{ chiklet.icon }}</span>{% endif %}</div><h3>Execution policy</h3><dl><dt>Approval</dt><dd>Required</dd><dt>Target</dt><dd>Authorised server only</dd><dt>Automation</dt><dd>{{ chiklet.foreman.job_template_name or ('Template #' ~ chiklet.foreman.job_template_id) }}</dd><dt>Audit</dt><dd>Full request & execution history</dd></dl></aside></div>{% endblock %}
++{% extends "base.html" %}
++{% block content %}
++{% macro render_field(field) %}
++  {% set spec = field.spec %}
++  {% set input_name = 'field__' ~ field.name %}
++  <label class="schema-field{% if field.width == 'half' %} schema-field-half{% endif %}">
++    <span class="schema-field-title">
++      {{ field.title }}{% if field.required %}<b>*</b>{% endif %}
++      {% if field.readonly %}<span class="field-badge">Fixed</span>{% endif %}
++    </span>
++
++    {% if field.readonly %}
++      {% if field.widget == 'toggle' %}
++        <span class="toggle-row readonly-control">
++          <input type="checkbox" {% if field.value %}checked{% endif %} disabled>
++          {{ 'Enabled' if field.value else 'Disabled' }}
++        </span>
++      {% elif field.widget == 'multiselect' %}
++        <select multiple disabled>
++          {% for option in field.options %}
++            <option {% if option.value in (field.value or []) %}selected{% endif %}>{{ option.label }}</option>
++          {% endfor %}
++        </select>
++      {% elif field.widget == 'textarea' %}
++        <textarea rows="4" disabled>{{ field.value if field.value is not none else '' }}</textarea>
++      {% else %}
++        <input value="{{ field.value if field.value is not none else '' }}" disabled>
++      {% endif %}
++
++    {% elif field.widget == 'toggle' %}
++      <span class="toggle-row">
++        <input type="checkbox" name="{{ input_name }}" value="true" {% if field.value %}checked{% endif %}>
++        Enable
++      </span>
++
++    {% elif field.widget == 'select' %}
++      <select name="{{ input_name }}" {% if field.required %}required{% endif %}>
++        {% if not field.required %}<option value="">Select…</option>{% endif %}
++        {% for option in field.options %}
++          <option value="{{ option.value }}" {% if field.value == option.value %}selected{% endif %}>{{ option.label }}</option>
++        {% endfor %}
++      </select>
++
++    {% elif field.widget == 'multiselect' %}
++      <select name="{{ input_name }}" multiple {% if field.required %}required{% endif %}>
++        {% for option in field.options %}
++          <option value="{{ option.value }}" {% if option.value in (field.value or []) %}selected{% endif %}>{{ option.label }}</option>
++        {% endfor %}
++      </select>
++
++    {% elif field.widget == 'number' %}
++      <input
++        type="number"
++        name="{{ input_name }}"
++        value="{{ field.value if field.value is not none else '' }}"
++        {% if spec.type == 'integer' %}step="1"{% else %}step="{{ spec.multipleOf if spec.multipleOf is defined else 'any' }}"{% endif %}
++        {% if spec.minimum is defined %}min="{{ spec.minimum }}"{% endif %}
++        {% if spec.maximum is defined %}max="{{ spec.maximum }}"{% endif %}
++        {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
++        {% if field.required %}required{% endif %}
++      >
++
++    {% elif field.widget == 'textarea' %}
++      <textarea
++        name="{{ input_name }}"
++        rows="{{ (spec.get('x-ui') or {}).get('rows', 5) }}"
++        {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
++        {% if spec.minLength is defined %}minlength="{{ spec.minLength }}"{% endif %}
++        {% if spec.maxLength is defined %}maxlength="{{ spec.maxLength }}"{% endif %}
++        {% if field.required %}required{% endif %}
++      >{{ field.value if field.value is not none else '' }}</textarea>
++
++    {% elif field.widget == 'date' %}
++      <input type="date" name="{{ input_name }}" value="{{ field.value if field.value is not none else '' }}" {% if field.required %}required{% endif %}>
++
++    {% elif field.widget == 'datetime-local' %}
++      <input type="datetime-local" name="{{ input_name }}" value="{{ field.value if field.value is not none else '' }}" {% if field.required %}required{% endif %}>
++
++    {% else %}
++      <input
++        type="text"
++        name="{{ input_name }}"
++        value="{{ field.value if field.value is not none else '' }}"
++        {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
++        {% if spec.minLength is defined %}minlength="{{ spec.minLength }}"{% endif %}
++        {% if spec.maxLength is defined %}maxlength="{{ spec.maxLength }}"{% endif %}
++        {% if spec.pattern is defined %}pattern="{{ spec.pattern }}"{% endif %}
++        {% if field.required %}required{% endif %}
++      >
++    {% endif %}
++
++    {% if field.description %}<small>{{ field.description }}</small>{% endif %}
++    {% if field.help and field.help != field.description %}<small class="field-help">{{ field.help }}</small>{% endif %}
++  </label>
++{% endmacro %}
++
++<a class="back" href="{{ url_for('catalog.index') }}">← Application catalogue</a>
++<div class="detail-layout">
++  <section class="card">
++    <div class="eyebrow">{{ chiklet.category or 'AUTOMATION' }}</div>
++    <h1>{{ chiklet.name }}</h1>
++    <p class="lede">{{ chiklet.description }}</p>
++    <p class="schema-intro">Configure the deployment for your requirement. Values shown are defaults unless marked <strong>Fixed</strong>.</p>
++
++    <form method="post" action="{{ url_for('requests.submit',chiklet_id=chiklet.id) }}" class="stack schema-form">
++      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
++
++      {% for group in form_layout %}
++      <fieldset class="form-section">
++        <legend>{{ group.name }}</legend>
++        <div class="form-grid">
++          {% for field in group.fields %}
++            {{ render_field(field) }}
++          {% endfor %}
++        </div>
++      </fieldset>
++      {% endfor %}
++
++      <fieldset class="form-section">
++        <legend>Target and change details</legend>
++        <div class="form-grid">
++          <label class="schema-field">
++            <span class="schema-field-title">Destination server<b>*</b></span>
++            <select name="server_id" required>
++              <option value="">Select an authorised server…</option>
++              {% for s in servers %}
++              <option value="{{ s.id }}" {% if selected_server_id is defined and selected_server_id == s.id %}selected{% endif %}>
++                {{ s.name }}{% if s.ip_address %} · {{ s.ip_address }}{% endif %} · {{ s.group.name }}
++              </option>
++              {% endfor %}
++            </select>
++            <small>The server list is filtered by both your entitlements and this Chiklet's allowed groups.</small>
++          </label>
++
++          <label class="schema-field">
++            <span class="schema-field-title">Business / change justification</span>
++            <textarea name="justification" rows="3" placeholder="Change reference, deployment purpose, incident reference…">{{ justification if justification is defined else '' }}</textarea>
++          </label>
++        </div>
++      </fieldset>
++
++      <div class="callout">Submitting creates an immutable snapshot of these selected values for approval. No Foreman API job is started until an authorised approver accepts it.</div>
++      <button class="button primary">Submit for approval</button>
++    </form>
++  </section>
++
++  <aside class="card side-card">
++    <div class="big-icon">
++      {% if chiklet.icon is mapping and chiklet.icon.type == 'image' %}
++        <img src="{% if chiklet.icon.src.startswith('/') %}{{ chiklet.icon.src }}{% else %}{{ url_for('catalog.asset',filename=chiklet.icon.src) }}{% endif %}" alt="{{ chiklet.icon.alt or chiklet.name }}">
++      {% elif chiklet.icon is mapping and chiklet.icon.type == 'text' %}
++        <span>{{ chiklet.icon.value }}</span>
++      {% else %}
++        <span>{{ chiklet.icon }}</span>
++      {% endif %}
++    </div>
++    <h3>Execution policy</h3>
++    <dl>
++      <dt>Approval</dt><dd>Required</dd>
++      <dt>Target</dt><dd>Authorised server only</dd>
++      <dt>Automation</dt><dd>{{ chiklet.foreman.job_template_name or ('Template #' ~ chiklet.foreman.job_template_id) }}</dd>
++      <dt>Audit</dt><dd>Full request & execution history</dd>
++    </dl>
++  </aside>
++</div>
++{% endblock %}
+diff -ruN '--exclude=.git' a/docs/CHIKLETS.md b/docs/CHIKLETS.md
+--- a/docs/CHIKLETS.md	2026-09-16 15:00:08.966475288 +0000
++++ b/docs/CHIKLETS.md	2026-09-16 15:27:35.076033697 +0000
+@@ -1,116 +1,151 @@
+-# Chiklet authoring
++# Chiklet form schema
+ 
+-Each JSON file directly under `chiklets/` is one self-service operation. Required top-level keys are `id`, `version`, `name`, `description`, `icon`, `allowed_server_groups`, `form_schema` and `foreman`.
++Chiklet JSON files are the source of truth for the Self-Service application form. The portal reads each Chiklet dynamically, renders the form controls from `form_schema`, validates the submitted values against the same JSON Schema, stores the approved values in the immutable request snapshot, and maps those values into Foreman job-template inputs using `foreman.input_map`.
+ 
+-The catalogue is read from the mounted `chiklets/` directory at request time and each definition is cached by file modification time. Adding, changing or removing a JSON file therefore does not require a container restart or rebuild.
+-
+-## Server-group scope
+-
+-Use explicit server-group slugs when a Chiklet is restricted:
+-
+-```json
+-"allowed_server_groups": ["linux-dev", "linux-uat"]
+-```
+-
+-Use the wildcard when the Chiklet is available in every server group:
+-
+-```json
+-"allowed_server_groups": ["*"]
+-```
+-
+-`*` affects Chiklet availability only. It never grants host access. The destination list and submission endpoint still enforce the signed-in user's server-group membership. A global administrator can target any enabled server in a group allowed by the Chiklet. The wildcard must be used by itself; `['*', 'linux-dev']` is rejected as ambiguous configuration.
+-
+-## Icons and hot-loadable assets
+-
+-Legacy text/emoji icons continue to work:
+-
+-```json
+-"icon": "DB"
+-```
+-
+-For a local image, place the asset under `chiklets/assets/` and reference it by relative filename:
+-
+-```text
+-chiklets/
+-├── install-mssql-odbc-driver.json
+-└── assets/
+-    └── mssql.svg
+-```
+-
+-```json
+-"icon": {
+-  "type": "image",
+-  "src": "mssql.svg",
+-  "alt": "Microsoft SQL Server"
+-}
+-```
+-
+-SVG, PNG, JPG/JPEG and WebP are supported. Asset paths are restricted to the Chiklet asset directory and path traversal is rejected. Images are served with no-cache headers so replacing the file is reflected without rebuilding the web image. Existing same-origin absolute paths such as `/static/...` are also accepted, although files added to the image's built-in static directory still require an image rebuild.
+-
+-A structured text icon is also supported:
+-
+-```json
+-"icon": {
+-  "type": "text",
+-  "value": "DB"
+-}
+-```
+-
+-## Form schema
+-
+-The form uses JSON Schema Draft 2020-12. The built-in renderer supports strings, integers, numbers, booleans, enums, enum arrays and multiline strings. Backend JSON Schema validation is authoritative.
+-
+-Raw password/secret fields are deliberately rejected. Pass references to secrets instead and resolve the actual secret inside Foreman, Ansible Vault or your enterprise secrets platform.
+-
+-Example Foreman mapping:
+-
+-```json
+-{
+-  "foreman": {
+-    "job_template_name": "SelfService - Deploy Web Application",
+-    "input_map": {
+-      "release_version": "version",
+-      "environment": "environment"
+-    }
+-  }
+-}
+-```
+-
+-The mapping key is the Foreman job-template input name and the value is the Chiklet form property.
+-
+-## Example: MSSQL ODBC driver
++## Example
+ 
+ ```json
+ {
+   "id": "install-mssql-odbc-driver",
+-  "version": "1.0.0",
++  "version": "1.1.0",
+   "name": "Install MSSQL ODBC Driver",
+-  "description": "Install the MSSQL ODBC driver on Linux.",
++  "description": "Install and configure the Microsoft SQL Server ODBC driver.",
+   "category": "Database",
++  "icon": {"type": "image", "src": "mssql.svg", "alt": "Microsoft SQL Server"},
+   "allowed_server_groups": ["*"],
+-  "icon": {
+-    "type": "image",
+-    "src": "mssql.svg",
+-    "alt": "Microsoft SQL Server"
+-  },
+   "form_schema": {
+     "$schema": "https://json-schema.org/draft/2020-12/schema",
+     "type": "object",
+     "properties": {
+       "mssql_odbc_package": {
+         "type": "string",
+-        "title": "Package Name",
+-        "default": "msodbcsql18-18.1.1.1"
++        "title": "ODBC Driver Package",
++        "enum": ["msodbcsql17", "msodbcsql18"],
++        "default": "msodbcsql18",
++        "description": "Driver package to install.",
++        "x-ui": {
++          "group": "Microsoft packages",
++          "order": 10,
++          "width": "half"
++        }
++      },
++      "mssql_tools_package": {
++        "type": "string",
++        "title": "Tools Package",
++        "enum": ["mssql-tools", "mssql-tools18"],
++        "default": "mssql-tools18",
++        "x-ui": {
++          "group": "Microsoft packages",
++          "order": 20,
++          "width": "half"
++        }
++      },
++      "mssql_package_state": {
++        "type": "string",
++        "title": "Package State",
++        "enum": ["present", "latest"],
++        "default": "present",
++        "x-ui": {
++          "group": "Installation",
++          "enum_labels": {
++            "present": "Installed",
++            "latest": "Latest available"
++          }
++        }
++      },
++      "restart_service": {
++        "type": "boolean",
++        "title": "Restart service",
++        "default": true,
++        "x-ui": {"group": "Installation"}
++      },
++      "retry_count": {
++        "type": "integer",
++        "title": "Retry count",
++        "default": 3,
++        "minimum": 0,
++        "maximum": 10,
++        "x-ui": {"group": "Advanced", "width": "half"}
++      },
++      "operator_notes": {
++        "type": "string",
++        "title": "Operator notes",
++        "default": "",
++        "x-ui": {"group": "Advanced", "widget": "textarea", "rows": 5}
++      },
++      "approved_repository": {
++        "type": "string",
++        "title": "Repository",
++        "default": "microsoft-approved",
++        "readOnly": true,
++        "x-ui": {"group": "Policy"}
+       }
+     },
+-    "required": ["mssql_odbc_package"],
++    "required": ["mssql_odbc_package", "mssql_tools_package", "mssql_package_state"],
+     "additionalProperties": false
+   },
+   "foreman": {
+     "job_template_name": "SelfService - Install MSSQL ODBC Driver",
+     "input_map": {
+-      "mssql_odbc_package": "mssql_odbc_package"
++      "mssql_odbc_package": "mssql_odbc_package",
++      "mssql_tools_package": "mssql_tools_package",
++      "mssql_package_state": "mssql_package_state",
++      "restart_service": "restart_service",
++      "retry_count": "retry_count",
++      "operator_notes": "operator_notes",
++      "approved_repository": "approved_repository"
+     }
+   }
+ }
+ ```
++
++## Rendering rules
++
++The portal infers controls from JSON Schema:
++
++| Schema | GUI control |
++| --- | --- |
++| `type: string` | text input |
++| `enum: [...]` | dropdown |
++| `type: boolean` | checkbox/toggle |
++| `type: integer` / `number` | numeric input |
++| `type: array` with `items.enum` | multi-select |
++| `format: date` | date picker |
++| `format: date-time` | date/time picker |
++| `format: multiline` or `format: textarea` | textarea |
++| `readOnly: true` | displayed as fixed configuration |
++
++Defaults are initial values, not locks. A user may change a default unless the field has `readOnly: true`.
++
++## `x-ui` presentation hints
++
++`x-ui` affects presentation only. JSON Schema remains authoritative for validation.
++
++Supported keys:
++
++- `widget`: `text`, `textarea`, `select`, `multiselect`, `toggle`, `number`, `date`, or `datetime-local`.
++- `group`: section heading in the form.
++- `order`: numeric field ordering within a section.
++- `width`: `full` or `half`.
++- `placeholder`: input placeholder.
++- `help`: additional help text.
++- `rows`: textarea row count.
++- `enum_labels`: display labels for enum values while preserving the underlying value sent to Foreman.
++
++## Foreman input mapping
++
++The left side is the Foreman job-template input name. The right side is the Chiklet form field name.
++
++```json
++"input_map": {
++  "foreman_input_name": "chiklet_form_field"
++}
++```
++
++Every `input_map` source must exist in `form_schema.properties`. Invalid Chiklet definitions are rejected when loaded rather than allowing an unmapped or hidden value to reach Foreman.
++
++## Security
++
++Raw passwords and secret fields are intentionally prohibited from Chiklet forms because submitted values become part of the immutable request/audit history. Pass secret references and resolve the actual secret in Foreman, Ansible Vault, or the organisation's secret-management platform.
++
++`readOnly` is enforced server-side. Editing browser HTML cannot override the value defined by the Chiklet.
+diff -ruN '--exclude=.git' a/tests/test_schema_driven_forms.py b/tests/test_schema_driven_forms.py
+--- a/tests/test_schema_driven_forms.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/test_schema_driven_forms.py	2026-09-16 15:29:14.228151045 +0000
+@@ -0,0 +1,200 @@
++import json
++from copy import deepcopy
++from pathlib import Path
++
++import pytest
++from werkzeug.datastructures import MultiDict
++
++from conftest import login
++from app.catalog.service import ChikletError, _validate_definition, validate_form
++from app.extensions import db
++from app.models import DeploymentRequest, Server
++
++
++def _schema_chiklet(app):
++    with app.app_context():
++        base = Path(app.config["CHIKLET_DIRECTORY"])
++        data = json.loads((base / "deploy-web-application.json").read_text(encoding="utf-8"))
++        data["id"] = "schema-ui-test"
++        data["name"] = "Schema UI Test"
++        data["form_schema"] = {
++            "$schema": "https://json-schema.org/draft/2020-12/schema",
++            "type": "object",
++            "properties": {
++                "package": {
++                    "type": "string",
++                    "title": "Package",
++                    "enum": ["v1", "v2"],
++                    "default": "v2",
++                    "description": "Choose the package version.",
++                    "x-ui": {"group": "Package settings", "order": 10, "width": "half"},
++                },
++                "state": {
++                    "type": "string",
++                    "title": "Package state",
++                    "enum": ["present", "latest"],
++                    "default": "present",
++                    "x-ui": {
++                        "group": "Package settings",
++                        "order": 20,
++                        "width": "half",
++                        "enum_labels": {"present": "Installed", "latest": "Latest available"},
++                    },
++                },
++                "restart": {
++                    "type": "boolean",
++                    "title": "Restart service",
++                    "default": True,
++                    "x-ui": {"group": "Runtime", "widget": "toggle"},
++                },
++                "workers": {
++                    "type": "integer",
++                    "title": "Worker count",
++                    "default": 4,
++                    "minimum": 1,
++                    "maximum": 32,
++                    "x-ui": {"group": "Runtime", "width": "half"},
++                },
++                "notes": {
++                    "type": "string",
++                    "title": "Deployment notes",
++                    "default": "",
++                    "x-ui": {"group": "Runtime", "widget": "textarea", "rows": 6},
++                },
++                "repository": {
++                    "type": "string",
++                    "title": "Repository",
++                    "default": "approved-production-repo",
++                    "readOnly": True,
++                    "x-ui": {"group": "Policy"},
++                },
++            },
++            "required": ["package", "state", "workers"],
++            "additionalProperties": False,
++        }
++        data["foreman"] = {
++            "job_template_name": "SelfService - Schema UI Test",
++            "input_map": {
++                "package_name": "package",
++                "package_state": "state",
++                "restart_service": "restart",
++                "worker_count": "workers",
++                "deployment_notes": "notes",
++                "repository": "repository",
++            },
++        }
++        (base / "schema-ui-test.json").write_text(json.dumps(data), encoding="utf-8")
++        return data
++
++
++def test_schema_renders_editable_controls_and_fixed_values(app, client):
++    _schema_chiklet(app)
++    login(client, "alice")
++    response = client.get("/chiklets/schema-ui-test")
++    assert response.status_code == 200
++    html = response.get_data(as_text=True)
++    assert 'name="field__package"' in html
++    assert '<option value="v2" selected>v2</option>' in html
++    assert 'Latest available' in html
++    assert 'name="field__restart"' in html
++    assert 'name="field__workers"' in html
++    assert 'type="number"' in html
++    assert 'name="field__notes"' in html
++    assert '<textarea' in html
++    assert 'approved-production-repo' in html
++    assert 'Fixed' in html
++
++
++def test_schema_submission_persists_user_selected_values(app, client):
++    _schema_chiklet(app)
++    login(client, "alice")
++    with app.app_context():
++        server_id = db.session.scalar(db.select(Server).where(Server.name == "demo01")).id
++
++    response = client.post(
++        "/requests/submit/schema-ui-test",
++        data={
++            "server_id": server_id,
++            "field__package": "v1",
++            "field__state": "latest",
++            "field__workers": "12",
++            "field__notes": "Custom deployment",
++            "field__repository": "tampered-repo",
++            "justification": "CHG-1234",
++        },
++    )
++    assert response.status_code == 302
++
++    with app.app_context():
++        item = db.session.scalar(db.select(DeploymentRequest).where(DeploymentRequest.chiklet_id == "schema-ui-test"))
++        assert item.form_data["package"] == "v1"
++        assert item.form_data["state"] == "latest"
++        assert item.form_data["restart"] is False
++        assert item.form_data["workers"] == 12
++        assert item.form_data["notes"] == "Custom deployment"
++        # Browser tampering cannot override a fixed/readOnly JSON value.
++        assert item.form_data["repository"] == "approved-production-repo"
++
++
++def test_schema_rejects_enum_value_not_allowed_by_chiklet(app):
++    chiklet = _schema_chiklet(app)
++    form = MultiDict({
++        "field__package": "malicious-package",
++        "field__state": "present",
++        "field__workers": "4",
++    })
++    data, errors = validate_form(chiklet, form)
++    assert data["package"] == "malicious-package"
++    assert any("is not one of" in error for error in errors)
++
++
++def test_input_map_must_reference_real_schema_fields(app):
++    chiklet = _schema_chiklet(app)
++    broken = deepcopy(chiklet)
++    broken["foreman"]["input_map"]["bad_foreman_input"] = "does_not_exist"
++    with pytest.raises(ChikletError, match="does_not_exist"):
++        _validate_definition(broken, "broken.json")
++
++
++def test_foreman_input_map_uses_customised_form_values(app):
++    from app.foreman.client import ForemanClient
++
++    chiklet = _schema_chiklet(app)
++    submitted = {
++        "package": "v1",
++        "state": "latest",
++        "restart": False,
++        "workers": 12,
++        "notes": "Custom deployment",
++        "repository": "approved-production-repo",
++    }
++
++    with app.app_context():
++        client = ForemanClient()
++        client.mock = False
++        client.resolve_template_id = lambda cfg: "245"
++        captured = {}
++
++        def fake_request(method, path, **kwargs):
++            captured["method"] = method
++            captured["path"] = path
++            captured["payload"] = kwargs["json"]
++            return {"id": 999, "status_label": "queued"}
++
++        client._request = fake_request
++        client.create_job(
++            chiklet,
++            {"name": "demo01", "foreman_host_id": 1},
++            submitted,
++            correlation_id="REQ-TEST",
++        )
++
++    inputs = captured["payload"]["job_invocation"]["inputs"]
++    assert inputs == {
++        "package_name": "v1",
++        "package_state": "latest",
++        "restart_service": False,
++        "worker_count": 12,
++        "deployment_notes": "Custom deployment",
++        "repository": "approved-production-repo",
++    }

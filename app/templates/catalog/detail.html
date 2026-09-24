@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block content %}
+{% macro render_field(field) %}
+  {% set spec = field.spec %}
+  {% set input_name = 'field__' ~ field.name %}
+  <label class="schema-field{% if field.width == 'half' %} schema-field-half{% endif %}">
+    <span class="schema-field-title">
+      {{ field.title }}{% if field.required %}<b>*</b>{% endif %}
+      {% if field.readonly %}<span class="field-badge">Fixed</span>{% endif %}
+    </span>
+
+    {% if field.readonly %}
+      {% if field.widget == 'toggle' %}
+        <span class="toggle-row readonly-control">
+          <input type="checkbox" {% if field.value %}checked{% endif %} disabled>
+          {{ 'Enabled' if field.value else 'Disabled' }}
+        </span>
+      {% elif field.widget == 'multiselect' %}
+        <select multiple disabled>
+          {% for option in field.options %}
+            <option {% if option.value in (field.value or []) %}selected{% endif %}>{{ option.label }}</option>
+          {% endfor %}
+        </select>
+      {% elif field.widget == 'textarea' %}
+        <textarea rows="4" disabled>{{ field.value if field.value is not none else '' }}</textarea>
+      {% else %}
+        <input value="{{ field.value if field.value is not none else '' }}" disabled>
+      {% endif %}
+
+    {% elif field.widget == 'toggle' %}
+      <span class="toggle-row">
+        <input type="checkbox" name="{{ input_name }}" value="true" {% if field.value %}checked{% endif %}>
+        Enable
+      </span>
+
+    {% elif field.widget == 'select' %}
+      <select name="{{ input_name }}" {% if field.required %}required{% endif %}>
+        {% if not field.required %}<option value="">Select…</option>{% endif %}
+        {% for option in field.options %}
+          <option value="{{ option.value }}" {% if field.value == option.value %}selected{% endif %}>{{ option.label }}</option>
+        {% endfor %}
+      </select>
+
+    {% elif field.widget == 'multiselect' %}
+      <select name="{{ input_name }}" multiple {% if field.required %}required{% endif %}>
+        {% for option in field.options %}
+          <option value="{{ option.value }}" {% if option.value in (field.value or []) %}selected{% endif %}>{{ option.label }}</option>
+        {% endfor %}
+      </select>
+
+    {% elif field.widget == 'number' %}
+      <input
+        type="number"
+        name="{{ input_name }}"
+        value="{{ field.value if field.value is not none else '' }}"
+        {% if spec.type == 'integer' %}step="1"{% else %}step="{{ spec.multipleOf if spec.multipleOf is defined else 'any' }}"{% endif %}
+        {% if spec.minimum is defined %}min="{{ spec.minimum }}"{% endif %}
+        {% if spec.maximum is defined %}max="{{ spec.maximum }}"{% endif %}
+        {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
+        {% if field.required %}required{% endif %}
+      >
+
+    {% elif field.widget == 'textarea' %}
+      <textarea
+        name="{{ input_name }}"
+        rows="{{ (spec.get('x-ui') or {}).get('rows', 5) }}"
+        {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
+        {% if spec.minLength is defined %}minlength="{{ spec.minLength }}"{% endif %}
+        {% if spec.maxLength is defined %}maxlength="{{ spec.maxLength }}"{% endif %}
+        {% if field.required %}required{% endif %}
+      >{{ field.value if field.value is not none else '' }}</textarea>
+
+    {% elif field.widget == 'date' %}
+      <input type="date" name="{{ input_name }}" value="{{ field.value if field.value is not none else '' }}" {% if field.required %}required{% endif %}>
+
+    {% elif field.widget == 'datetime-local' %}
+      <input type="datetime-local" name="{{ input_name }}" value="{{ field.value if field.value is not none else '' }}" {% if field.required %}required{% endif %}>
+
+    {% else %}
+      <input
+        type="text"
+        name="{{ input_name }}"
+        value="{{ field.value if field.value is not none else '' }}"
+        {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
+        {% if spec.minLength is defined %}minlength="{{ spec.minLength }}"{% endif %}
+        {% if spec.maxLength is defined %}maxlength="{{ spec.maxLength }}"{% endif %}
+        {% if spec.pattern is defined %}pattern="{{ spec.pattern }}"{% endif %}
+        {% if field.required %}required{% endif %}
+      >
+    {% endif %}
+
+    {% if field.description %}<small>{{ field.description }}</small>{% endif %}
+    {% if field.help and field.help != field.description %}<small class="field-help">{{ field.help }}</small>{% endif %}
+  </label>
+{% endmacro %}
+
+<a class="back" href="{{ url_for('catalog.index') }}">← Application catalogue</a>
+<div class="detail-layout">
+  <section class="card">
+    <div class="eyebrow">{{ chiklet.category or 'AUTOMATION' }}</div>
+    <h1>{{ chiklet.name }}</h1>
+    <p class="lede">{{ chiklet.description }}</p>
+    <p class="schema-intro">Configure the deployment for your requirement. Values shown are defaults unless marked <strong>Fixed</strong>.</p>
+
+    <form method="post" action="{{ url_for('requests.submit',chiklet_id=chiklet.id) }}" class="stack schema-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+      {% for group in form_layout %}
+      <fieldset class="form-section">
+        <legend>{{ group.name }}</legend>
+        <div class="form-grid">
+          {% for field in group.fields %}
+            {{ render_field(field) }}
+          {% endfor %}
+        </div>
+      </fieldset>
+      {% endfor %}
+
+      <fieldset class="form-section">
+        <legend>Target and change details</legend>
+        <div class="form-grid">
+          <label class="schema-field">
+            <span class="schema-field-title">Destination server<b>*</b></span>
+            <select name="server_id" required>
+              <option value="">Select an authorised server…</option>
+              {% for s in servers %}
+              <option value="{{ s.id }}" {% if selected_server_id is defined and selected_server_id == s.id %}selected{% endif %}>
+                {{ s.name }}{% if s.ip_address %} · {{ s.ip_address }}{% endif %} · {{ s.group.name }}
+              </option>
+              {% endfor %}
+            </select>
+            <small>The server list is filtered by both your entitlements and this Chiklet's allowed groups.</small>
+          </label>
+
+          <label class="schema-field">
+            <span class="schema-field-title">Business / change justification</span>
+            <textarea name="justification" rows="3" placeholder="Change reference, deployment purpose, incident reference…">{{ justification if justification is defined else '' }}</textarea>
+          </label>
+        </div>
+      </fieldset>
+
+      <div class="callout">Submitting creates an immutable snapshot of these selected values for approval. No Foreman API job is started until an authorised approver accepts it.</div>
+      <button class="button primary">Submit for approval</button>
+    </form>
+  </section>
+
+  <aside class="card side-card">
+    <div class="big-icon">
+      {% if chiklet.icon is mapping and chiklet.icon.type == 'image' %}
+        <img src="{% if chiklet.icon.src.startswith('/') %}{{ chiklet.icon.src }}{% else %}{{ url_for('catalog.asset',filename=chiklet.icon.src) }}{% endif %}" alt="{{ chiklet.icon.alt or chiklet.name }}">
+      {% elif chiklet.icon is mapping and chiklet.icon.type == 'text' %}
+        <span>{{ chiklet.icon.value }}</span>
+      {% else %}
+        <span>{{ chiklet.icon }}</span>
+      {% endif %}
+    </div>
+    <h3>Execution policy</h3>
+    <dl>
+      <dt>Approval</dt><dd>Required</dd>
+      <dt>Target</dt><dd>Authorised server only</dd>
+      <dt>Automation</dt><dd>{{ chiklet.foreman.job_template_name or ('Template #' ~ chiklet.foreman.job_template_id) }}</dd>
+      <dt>Audit</dt><dd>Full request & execution history</dd>
+    </dl>
+  </aside>
+</div>
+{% endblock %}

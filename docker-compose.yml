@@ -1,0 +1,61 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-portal}
+      POSTGRES_USER: ${POSTGRES_USER:-portal}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL","pg_isready -U ${POSTGRES_USER:-portal} -d ${POSTGRES_DB:-portal}"], interval: 10s, timeout: 5s, retries: 10}
+    restart: unless-stopped
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server","--appendonly","yes"]
+    volumes: [redis_data:/data]
+    healthcheck: {test: ["CMD","redis-cli","ping"], interval: 10s, timeout: 3s, retries: 10}
+    restart: unless-stopped
+  web:
+    build: .
+    env_file: .env
+    environment: {RUN_MIGRATIONS: "true"}
+    depends_on: {db: {condition: service_healthy}, redis: {condition: service_healthy}}
+    volumes: ["./chiklets:/app/chiklets:ro","./secrets/ca:/app/secrets/ca:ro"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp"]
+    restart: unless-stopped
+  worker:
+    build: .
+    env_file: .env
+    command: ["celery","-A","celery_app.celery","worker","--loglevel=INFO","--concurrency=2"]
+    depends_on: {db: {condition: service_healthy}, redis: {condition: service_healthy}}
+    volumes: ["./chiklets:/app/chiklets:ro","./secrets/ca:/app/secrets/ca:ro"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp"]
+    restart: unless-stopped
+  scheduler:
+    build: .
+    env_file: .env
+    command: ["celery","-A","celery_app.celery","beat","--loglevel=INFO"]
+    depends_on: {db: {condition: service_healthy}, redis: {condition: service_healthy}}
+    volumes: ["./chiklets:/app/chiklets:ro"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp"]
+    restart: unless-stopped
+  nginx:
+    build: {context: ., dockerfile: docker/nginx/Dockerfile}
+    environment:
+      PORTAL_HOSTNAME: "${PORTAL_HOSTNAME:-localhost}"
+    ports: ["80:80","443:443"]
+    depends_on:
+      web: {condition: service_healthy}
+    volumes: ["./secrets/tls:/etc/nginx/certs"]
+    restart: unless-stopped
+volumes: {postgres_data: {}, redis_data: {}}

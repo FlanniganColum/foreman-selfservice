@@ -1,0 +1,474 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index cb8e476..2091b3b 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,14 @@
+ # Changelog
+ 
++## 1.0.3
++
++- Added Foreman compatibility fallback when `GET /api/job_invocations/:id/hosts` is unavailable (404), using hosts embedded in the job-invocation response.
++- Preserves terminal Foreman job state even when host-detail enrichment fails.
++- Uses structured Foreman failed-host counts as a defensive signal when mapping terminal execution state.
++- Reuses cached/fallback target host data when retrieving Foreman output.
++- Automatically loads Foreman output on failed or cancelled requests in the request detail view.
++- Added regression tests for older Foreman host-list compatibility and failure-state mapping.
++
+ ## 1.0.2
+ 
+ - Added `allowed_server_groups: ["*"]` wildcard support without weakening per-user server-group RBAC.
+diff --git a/app/api.py b/app/api.py
+index a06e53e..ec1df23 100644
+--- a/app/api.py
++++ b/app/api.py
+@@ -17,6 +17,14 @@ def _authorise(item):
+     abort(403)
+ 
+ 
++def _target_host_fallback(item):
++    target = item.target_snapshot or {}
++    host_id = target.get("foreman_host_id")
++    if not host_id:
++        return []
++    return [{"id": host_id, "host_id": host_id, "name": target.get("name")}]
++
++
+ @bp.get("/requests/<request_id>/status")
+ @login_required
+ def request_status(request_id):
+@@ -49,13 +57,28 @@ def request_output(request_id):
+         return jsonify({"ready": False, "outputs": []})
+     client = ForemanClient()
+     if client.mock:
+-        return jsonify({"ready": True, "outputs": [{"host": item.target_snapshot["name"], "output": "Mock execution completed successfully."}]})
+-    hosts = client.get_hosts(execution.foreman_job_id)
++        return jsonify({
++            "ready": True,
++            "outputs": [{"host": item.target_snapshot["name"], "output": "Mock execution completed successfully."}],
++        })
++
++    # Reuse cached host details first. If they are unavailable, use Foreman's
++    # compatibility-aware discovery and finally the immutable request target.
++    hosts = execution.host_results or []
++    if not hosts:
++        state = client.get_job(execution.foreman_job_id)
++        hosts = client.get_hosts(execution.foreman_job_id, state=state)
++    hosts = hosts or _target_host_fallback(item)
++
+     outputs = []
+     for host in hosts:
+         host_id = host.get("host_id") or host.get("id") or host.get("targeted_host_id")
+         if not host_id:
+             continue
+         raw = client.get_host_output(execution.foreman_job_id, host_id)
+-        outputs.append({"host": host.get("host") or host.get("name") or str(host_id), "status": host.get("status"), "output": raw})
+-    return jsonify({"ready": True, "outputs": outputs})
++        outputs.append({
++            "host": host.get("host") or host.get("name") or str(host_id),
++            "status": host.get("status"),
++            "output": raw,
++        })
++    return jsonify({"ready": bool(outputs), "outputs": outputs})
+diff --git a/app/foreman/client.py b/app/foreman/client.py
+index 190acc0..1ec7019 100644
+--- a/app/foreman/client.py
++++ b/app/foreman/client.py
+@@ -1,50 +1,155 @@
+ import requests
+ from flask import current_app
+-class ForemanError(RuntimeError): pass
+-def _escape(value): return value.replace("\\","\\\\").replace('"','\\"')
++
++
++class ForemanError(RuntimeError):
++    def __init__(self, message, *, status_code=None, method=None, path=None, response_text=None):
++        super().__init__(message)
++        self.status_code = status_code
++        self.method = method
++        self.path = path
++        self.response_text = response_text
++
++
++def _escape(value):
++    return value.replace("\\", "\\\\").replace('"', '\\"')
++
++
+ class ForemanClient:
+     def __init__(self):
+-        cfg=current_app.config; self.base=cfg["FOREMAN_URL"].rstrip("/"); self.timeout=cfg["FOREMAN_TIMEOUT_SECONDS"]; self.verify=cfg["FOREMAN_CA_BUNDLE"] or cfg["FOREMAN_VERIFY_TLS"]; self.mock=cfg["FOREMAN_MOCK"]
+-        self.session=requests.Session(); self.session.headers.update({"Accept":"application/json","Content-Type":"application/json"})
++        cfg = current_app.config
++        self.base = cfg["FOREMAN_URL"].rstrip("/")
++        self.timeout = cfg["FOREMAN_TIMEOUT_SECONDS"]
++        self.verify = cfg["FOREMAN_CA_BUNDLE"] or cfg["FOREMAN_VERIFY_TLS"]
++        self.mock = cfg["FOREMAN_MOCK"]
++        self.session = requests.Session()
++        self.session.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+         if cfg["FOREMAN_API_TOKEN"]:
+             if not cfg["FOREMAN_USERNAME"]:
+                 raise ForemanError("FOREMAN_USERNAME is required when using a Foreman Personal Access Token")
+-            self.session.auth=(cfg["FOREMAN_USERNAME"],cfg["FOREMAN_API_TOKEN"])
++            self.session.auth = (cfg["FOREMAN_USERNAME"], cfg["FOREMAN_API_TOKEN"])
+         elif cfg["FOREMAN_USERNAME"]:
+-            self.session.auth=(cfg["FOREMAN_USERNAME"],cfg["FOREMAN_PASSWORD"])
+-    def _request(self,method,path,**kwargs):
+-        r=self.session.request(method,f"{self.base}{path}",timeout=self.timeout,verify=self.verify,**kwargs)
+-        if not r.ok: raise ForemanError(f"Foreman {method} {path} returned {r.status_code}: {r.text[:1000]}")
++            self.session.auth = (cfg["FOREMAN_USERNAME"], cfg["FOREMAN_PASSWORD"])
++
++    def _request(self, method, path, **kwargs):
++        r = self.session.request(
++            method,
++            f"{self.base}{path}",
++            timeout=self.timeout,
++            verify=self.verify,
++            **kwargs,
++        )
++        if not r.ok:
++            response_text = r.text[:1000]
++            raise ForemanError(
++                f"Foreman {method} {path} returned {r.status_code}: {response_text}",
++                status_code=r.status_code,
++                method=method,
++                path=path,
++                response_text=response_text,
++            )
+         return r.json() if r.content else {}
+-    def resolve_template_id(self,cfg):
+-        if cfg.get("job_template_id"): return str(cfg["job_template_id"])
+-        data=self._request("GET","/api/job_templates",params={"search":f'name="{_escape(cfg["job_template_name"])}"',"per_page":"all"})
+-        matches=data.get("results",[])
+-        if not matches: raise ForemanError(f"Foreman job template not found: {cfg['job_template_name']}")
++
++    def resolve_template_id(self, cfg):
++        if cfg.get("job_template_id"):
++            return str(cfg["job_template_id"])
++        data = self._request(
++            "GET",
++            "/api/job_templates",
++            params={"search": f'name="{_escape(cfg["job_template_name"])}"', "per_page": "all"},
++        )
++        matches = data.get("results", [])
++        if not matches:
++            raise ForemanError(f"Foreman job template not found: {cfg['job_template_name']}")
+         return str(matches[0]["id"])
+-    def find_job_by_correlation(self,correlation_id):
++
++    def find_job_by_correlation(self, correlation_id):
+         if self.mock:
+             return None
+-        data=self._request("GET","/api/job_invocations",params={"search":f'description ~ "{_escape(correlation_id)}"',"order":"id DESC","per_page":"1"})
+-        results=data.get("results",[])
++        data = self._request(
++            "GET",
++            "/api/job_invocations",
++            params={
++                "search": f'description ~ "{_escape(correlation_id)}"',
++                "order": "id DESC",
++                "per_page": "1",
++            },
++        )
++        results = data.get("results", [])
+         return results[0] if results else None
+-    def create_job(self,config_snapshot,target_snapshot,form_data,correlation_id=None):
++
++    def create_job(self, config_snapshot, target_snapshot, form_data, correlation_id=None):
+         if self.mock:
+-            import secrets; return {"id":f"mock-{secrets.token_hex(4)}","status_label":"queued"}
+-        fcfg=config_snapshot["foreman"]; template_id=self.resolve_template_id(fcfg); inputs={}
+-        for foreman_name,source_name in fcfg.get("input_map",{}).items():
+-            if source_name in form_data: inputs[foreman_name]=form_data[source_name]
+-        description=f"Self-Service {{job_category}} - {target_snapshot['name']}"
++            import secrets
++
++            return {"id": f"mock-{secrets.token_hex(4)}", "status_label": "queued"}
++        fcfg = config_snapshot["foreman"]
++        template_id = self.resolve_template_id(fcfg)
++        inputs = {}
++        for foreman_name, source_name in fcfg.get("input_map", {}).items():
++            if source_name in form_data:
++                inputs[foreman_name] = form_data[source_name]
++        description = f"Self-Service {{job_category}} - {target_snapshot['name']}"
+         if correlation_id:
+             description += f" | {correlation_id}"
+-        payload={"job_invocation":{"job_template_id":template_id,"targeting_type":"static_query","search_query":f'name="{_escape(target_snapshot["name"])}"',"inputs":inputs,"description_format":description}}
+-        return self._request("POST","/api/job_invocations",json=payload)
+-    def get_job(self,job_id):
+-        if self.mock: return {"id":job_id,"status_label":"succeeded","status":0,"succeeded":1,"failed":0,"pending":0}
+-        return self._request("GET",f"/api/job_invocations/{job_id}",params={"host_status":"true"})
+-    def get_hosts(self,job_id):
+-        if self.mock: return []
+-        return self._request("GET",f"/api/job_invocations/{job_id}/hosts",params={"per_page":"all"}).get("results",[])
+-    def get_host_output(self,job_id,host_id):
+-        if self.mock: return "Mock execution completed successfully."
+-        return self._request("GET",f"/api/job_invocations/{job_id}/hosts/{host_id}")
++        payload = {
++            "job_invocation": {
++                "job_template_id": template_id,
++                "targeting_type": "static_query",
++                "search_query": f'name="{_escape(target_snapshot["name"])}"',
++                "inputs": inputs,
++                "description_format": description,
++            }
++        }
++        return self._request("POST", "/api/job_invocations", json=payload)
++
++    def get_job(self, job_id):
++        if self.mock:
++            return {
++                "id": job_id,
++                "status_label": "succeeded",
++                "status": 0,
++                "succeeded": 1,
++                "failed": 0,
++                "pending": 0,
++            }
++        return self._request("GET", f"/api/job_invocations/{job_id}", params={"host_status": "true"})
++
++    @staticmethod
++    def _hosts_from_job_state(state):
++        """Return hosts embedded in a job invocation response, if present.
++
++        Older Foreman/Remote Execution combinations may not implement
++        GET /api/job_invocations/:id/hosts, while still returning the targeted
++        host list in GET /api/job_invocations/:id?host_status=true.
++        """
++        if not isinstance(state, dict):
++            return []
++        targeting = state.get("targeting") or {}
++        hosts = targeting.get("hosts") or state.get("hosts") or []
++        if isinstance(hosts, dict):
++            hosts = hosts.get("results") or []
++        return hosts if isinstance(hosts, list) else []
++
++    def get_hosts(self, job_id, state=None):
++        if self.mock:
++            return []
++        try:
++            data = self._request(
++                "GET",
++                f"/api/job_invocations/{job_id}/hosts",
++                params={"per_page": "all"},
++            )
++            return data.get("results", [])
++        except ForemanError as exc:
++            if exc.status_code != 404:
++                raise
++            # Compatibility fallback for Foreman versions where the dedicated
++            # host-list endpoint is unavailable.
++            state = state or self.get_job(job_id)
++            return self._hosts_from_job_state(state)
++
++    def get_host_output(self, job_id, host_id):
++        if self.mock:
++            return "Mock execution completed successfully."
++        return self._request("GET", f"/api/job_invocations/{job_id}/hosts/{host_id}")
+diff --git a/app/jobs/tasks.py b/app/jobs/tasks.py
+index 991d189..3d87910 100644
+--- a/app/jobs/tasks.py
++++ b/app/jobs/tasks.py
+@@ -7,6 +7,16 @@ from ..foreman.client import ForemanClient
+ from ..audit.service import audit
+ 
+ 
++TERMINAL_STATES = {"succeeded", "failed", "cancelled"}
++
++
++def _as_int(value):
++    try:
++        return int(value)
++    except (TypeError, ValueError):
++        return 0
++
++
+ def _map(label):
+     return {
+         "queued": "queued",
+@@ -14,9 +24,36 @@ def _map(label):
+         "succeeded": "succeeded",
+         "failed": "failed",
+         "cancelled": "cancelled",
++        "canceled": "cancelled",
+     }.get((label or "").lower(), "running")
+ 
+ 
++def _map_foreman_state(state):
++    """Map structured Foreman job data to the portal execution state.
++
++    status_label remains the primary source of truth. Structured failed-host
++    counts take precedence over a success label so the portal cannot report a
++    successful deployment when Foreman itself reports failed hosts.
++    """
++    label = (state.get("status_label") or "").strip()
++    mapped = _map(label)
++    failed = _as_int(state.get("failed"))
++    pending = _as_int(state.get("pending"))
++    running = _as_int(state.get("running"))
++
++    if failed > 0 and pending == 0 and running == 0:
++        return "failed", label or "failed"
++    return mapped, label or mapped
++
++
++def _fallback_target_host(item):
++    target = item.target_snapshot or {}
++    host_id = target.get("foreman_host_id")
++    if not host_id:
++        return []
++    return [{"id": host_id, "host_id": host_id, "name": target.get("name"), "status": item.status}]
++
++
+ def _execution_lock(request_id):
+     redis = Redis.from_url(current_app.config["REDIS_URL"])
+     return redis.lock(f"foreman-selfservice:execute:{request_id}", timeout=180, blocking_timeout=1)
+@@ -117,19 +154,32 @@ def reconcile_active_jobs():
+         try:
+             client = ForemanClient()
+             state = client.get_job(execn.foreman_job_id)
+-            label = state.get("status_label", "running")
+-            mapped = _map(label)
++            mapped, label = _map_foreman_state(state)
+             execn.status_label = label
+             execn.status = mapped
+             execn.last_polled_at = utcnow()
++            execn.error_message = None
+             item = execn.request
+             item.status = mapped
+             if mapped == "running" and not execn.started_at:
+                 execn.started_at = utcnow()
+-            if mapped in {"succeeded", "failed", "cancelled"}:
+-                execn.finished_at = utcnow()
+-                item.completed_at = utcnow()
+-                execn.host_results = client.get_hosts(execn.foreman_job_id)
++            if mapped in TERMINAL_STATES:
++                execn.finished_at = execn.finished_at or utcnow()
++                item.completed_at = item.completed_at or utcnow()
++                try:
++                    hosts = client.get_hosts(execn.foreman_job_id, state=state)
++                    execn.host_results = hosts or _fallback_target_host(item)
++                except Exception as host_exc:
++                    # Host-detail enrichment must never prevent the authoritative
++                    # Foreman terminal state from being committed to the portal.
++                    current_app.logger.warning(
++                        "Foreman job %s reached %s but host details could not be retrieved: %s",
++                        execn.foreman_job_id,
++                        mapped,
++                        host_exc,
++                    )
++                    execn.host_results = execn.host_results or _fallback_target_host(item)
++                    execn.error_message = f"Job status recorded; Foreman host-detail lookup failed: {host_exc}"[:4000]
+                 audit(
+                     "FOREMAN_JOB_COMPLETED",
+                     entity_type="deployment_request",
+diff --git a/app/static/js/app.js b/app/static/js/app.js
+index cdedcff..6050071 100644
+--- a/app/static/js/app.js
++++ b/app/static/js/app.js
+@@ -1,3 +1,51 @@
+-(function(){const panel=document.querySelector("[data-status-url]");if(!panel)return;const url=panel.dataset.statusUrl;const terminal=new Set(["succeeded","failed","cancelled","rejected"]);async function poll(){try{const r=await fetch(url,{headers:{"Accept":"application/json"}});if(!r.ok)return;const d=await r.json();const s=document.getElementById("request-status");if(s){s.textContent=d.status.replaceAll("_"," ");s.className="status "+d.status;}const f=document.getElementById("foreman-job");if(f)f.textContent=d.foreman_job_id||"Waiting to submit";const e=document.getElementById("execution-state");if(e)e.textContent=d.status_label||d.status;const l=document.getElementById("last-polled");if(l)l.textContent=d.last_polled_at||"Not yet polled";if(!terminal.has(d.status))setTimeout(poll,5000);}catch(e){setTimeout(poll,10000)}}setTimeout(poll,3000);})();
++(function(){
++  const panel=document.querySelector("[data-status-url]");
++  if(!panel)return;
++  const url=panel.dataset.statusUrl;
++  const terminal=new Set(["succeeded","failed","cancelled","rejected"]);
++  async function poll(){
++    try{
++      const r=await fetch(url,{headers:{"Accept":"application/json"}});
++      if(!r.ok)return;
++      const d=await r.json();
++      const s=document.getElementById("request-status");
++      if(s){s.textContent=d.status.replaceAll("_"," ");s.className="status "+d.status;}
++      const f=document.getElementById("foreman-job");if(f)f.textContent=d.foreman_job_id||"Waiting to submit";
++      const e=document.getElementById("execution-state");if(e)e.textContent=d.status_label||d.status;
++      const l=document.getElementById("last-polled");if(l)l.textContent=d.last_polled_at||"Not yet polled";
++      if((d.status==="failed"||d.status==="cancelled")&&window.loadForemanOutput)window.loadForemanOutput(true);
++      if(!terminal.has(d.status))setTimeout(poll,5000);
++    }catch(e){setTimeout(poll,10000)}
++  }
++  setTimeout(poll,3000);
++})();
+ 
+-(function(){const b=document.getElementById("load-output");if(!b)return;b.addEventListener("click",async()=>{b.disabled=true;b.textContent="Loading output…";const box=document.getElementById("job-output");try{const r=await fetch(b.dataset.outputUrl,{headers:{Accept:"application/json"}});const d=await r.json();box.hidden=false;box.textContent=d.ready?d.outputs.map(x=>`=== ${x.host}${x.status?" ["+x.status+"]":""} ===\n${typeof x.output==="string"?x.output:JSON.stringify(x.output,null,2)}`).join("\n\n"):"Output is not available yet.";}catch(e){box.hidden=false;box.textContent="Unable to retrieve Foreman output.";}finally{b.disabled=false;b.textContent="Refresh Foreman output";}});})();
++(function(){
++  const b=document.getElementById("load-output");
++  if(!b)return;
++  let loading=false;
++  async function loadOutput(automatic){
++    if(loading)return;
++    loading=true;
++    b.disabled=true;
++    b.textContent="Loading output…";
++    const box=document.getElementById("job-output");
++    try{
++      const r=await fetch(b.dataset.outputUrl,{headers:{Accept:"application/json"}});
++      const d=await r.json();
++      box.hidden=false;
++      box.textContent=d.ready?d.outputs.map(x=>`=== ${x.host}${x.status?" ["+x.status+"]":""} ===\n${typeof x.output==="string"?x.output:JSON.stringify(x.output,null,2)}`).join("\n\n"):"Output is not available yet.";
++    }catch(e){
++      box.hidden=false;
++      box.textContent="Unable to retrieve Foreman output.";
++    }finally{
++      loading=false;
++      b.disabled=false;
++      b.textContent="Refresh Foreman output";
++    }
++  }
++  window.loadForemanOutput=loadOutput;
++  b.addEventListener("click",()=>loadOutput(false));
++  const current=document.getElementById("request-status");
++  if(current&&(current.classList.contains("failed")||current.classList.contains("cancelled")))loadOutput(true);
++})();
+diff --git a/tests/test_foreman_status_compat.py b/tests/test_foreman_status_compat.py
+new file mode 100644
+index 0000000..aa964bc
+--- /dev/null
++++ b/tests/test_foreman_status_compat.py
+@@ -0,0 +1,48 @@
++import pytest
++
++from app.foreman.client import ForemanClient, ForemanError
++from app.jobs.tasks import _map_foreman_state
++
++
++def test_get_hosts_falls_back_to_targeting_hosts_on_404(app):
++    with app.app_context():
++        client = ForemanClient()
++        client.mock = False
++        calls = []
++
++        def fake_request(method, path, **kwargs):
++            calls.append(path)
++            if path.endswith("/hosts"):
++                raise ForemanError("not found", status_code=404, method=method, path=path)
++            return {"targeting": {"hosts": [{"id": 42, "name": "demo01"}]}}
++
++        client._request = fake_request
++        hosts = client.get_hosts("247")
++        assert hosts == [{"id": 42, "name": "demo01"}]
++        assert calls == ["/api/job_invocations/247/hosts", "/api/job_invocations/247"]
++
++
++def test_get_hosts_does_not_hide_non_404_foreman_errors(app):
++    with app.app_context():
++        client = ForemanClient()
++        client.mock = False
++
++        def fake_request(method, path, **kwargs):
++            raise ForemanError("forbidden", status_code=403, method=method, path=path)
++
++        client._request = fake_request
++        with pytest.raises(ForemanError) as exc:
++            client.get_hosts("247")
++        assert exc.value.status_code == 403
++
++
++def test_foreman_failed_label_maps_to_failed():
++    status, label = _map_foreman_state({"status_label": "failed", "failed": 1, "pending": 0})
++    assert status == "failed"
++    assert label == "failed"
++
++
++def test_structured_failed_host_count_overrides_success_label():
++    status, label = _map_foreman_state({"status_label": "succeeded", "failed": 1, "pending": 0, "running": 0})
++    assert status == "failed"
++    assert label == "succeeded"

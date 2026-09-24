@@ -1,0 +1,54 @@
+{
+  "id": "linux-patching",
+  "version": "1.0.0",
+  "name": "Linux Patching",
+  "description": "Run the approved operating-system patching workflow with optional reboot.",
+  "category": "Operating System",
+  "icon": "\u2726",
+  "allowed_server_groups": [
+    "demo",
+    "linux-dev",
+    "linux-uat",
+    "linux-prod"
+  ],
+  "form_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "patch_scope": {
+        "type": "string",
+        "title": "Patch scope",
+        "enum": [
+          "Security only",
+          "All approved updates"
+        ],
+        "default": "Security only"
+      },
+      "allow_reboot": {
+        "type": "boolean",
+        "title": "Allow reboot",
+        "default": true
+      },
+      "change_reference": {
+        "type": "string",
+        "title": "Change reference",
+        "minLength": 3,
+        "maxLength": 80,
+        "placeholder": "CHG0123456"
+      }
+    },
+    "required": [
+      "patch_scope",
+      "change_reference"
+    ],
+    "additionalProperties": false
+  },
+  "foreman": {
+    "job_template_name": "SelfService - Linux Patching",
+    "input_map": {
+      "patch_scope": "patch_scope",
+      "allow_reboot": "allow_reboot",
+      "change_reference": "change_reference"
+    }
+  }
+}

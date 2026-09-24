@@ -1,0 +1,8 @@
+.git
+__pycache__
+.pytest_cache
+*.pyc
+.env
+secrets/tls/*
+secrets/ca/*
+deploy/

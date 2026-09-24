@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+secrets/tls/*
+secrets/ca/*
+!secrets/**/.gitkeep

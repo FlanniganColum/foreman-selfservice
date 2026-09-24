@@ -1,0 +1,218 @@
+# Foreman Self-Service Portal - production defaults
+#
+# The chart deliberately does NOT deploy PostgreSQL or Redis. In production,
+# point DATABASE_URL / REDIS_URL / CELERY_* at managed or separately operated
+# services via secrets.existingSecret.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: registry.example.com/foreman-selfservice
+  tag: "1.1.0"
+  # Prefer an immutable digest in production. When set, digest takes precedence
+  # over tag, e.g. sha256:abc123...
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# This Secret must exist before `helm install` because the migration hook runs
+# before ordinary chart resources are created.
+secrets:
+  existingSecret: foreman-selfservice-secrets
+
+config:
+  portalHostname: selfservice.example.com
+  sessionCookieSecure: true
+  trustProxyHeaders: true
+
+  auth:
+    defaultProvider: entra
+    enableEntra: true
+    enableLdap: true
+    enableLocal: true
+    allowIdentityAutoLink: false
+
+  entra:
+    tenantId: ""
+    clientId: ""
+    redirectUri: https://selfservice.example.com/auth/entra/callback
+    autoProvision: true
+
+  ldap:
+    uri: ldaps://ad.example.com:636
+    baseDn: DC=example,DC=com
+    bindDn: CN=svc_portal,OU=Service Accounts,DC=example,DC=com
+    userFilter: '(&(objectClass=user)(sAMAccountName={username}))'
+    usernameAttribute: sAMAccountName
+    emailAttribute: mail
+    displayNameAttribute: displayName
+    tlsValidate: true
+    autoProvision: true
+
+  foreman:
+    url: https://foreman.example.com
+    username: ""
+    verifyTls: true
+    timeoutSeconds: 30
+    reconcileIntervalSeconds: 5
+    mock: false
+
+  localAuth:
+    lockoutAttempts: 5
+    lockoutMinutes: 15
+
+# Optional corporate CA bundle for Foreman TLS verification.
+# Create this ConfigMap before installing the chart.
+foremanCa:
+  existingConfigMap: ""
+  key: foreman-ca.pem
+
+# Chiklet content modes:
+# - bundled: chart creates a ConfigMap from deploy/helm/.../chiklets/*.json
+# - existingConfigMap: mount an operator-managed ConfigMap
+# - pvc: mount an existing PVC (recommended for live JSON + binary assets)
+# - image: use /app/chiklets baked into the application image
+chiklets:
+  mode: bundled
+  existingConfigMap: ""
+  existingClaim: ""
+  mountPath: /app/chiklets
+
+web:
+  replicaCount: 2
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  terminationGracePeriodSeconds: 30
+  probes:
+    startup:
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 30
+    liveness:
+      periodSeconds: 20
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+worker:
+  replicaCount: 2
+  concurrency: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  terminationGracePeriodSeconds: 60
+
+# Celery Beat must remain singleton with the current application architecture.
+scheduler:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  terminationGracePeriodSeconds: 30
+
+migration:
+  enabled: true
+  activeDeadlineSeconds: 300
+  backoffLimit: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Optional one-time local break-glass administrator bootstrap. Credentials must
+# be present in the existing Secret as BOOTSTRAP_ADMIN_USERNAME,
+# BOOTSTRAP_ADMIN_PASSWORD and optionally BOOTSTRAP_ADMIN_EMAIL.
+bootstrapAdmin:
+  enabled: false
+  activeDeadlineSeconds: 300
+  backoffLimit: 1
+
+# Ingress terminates TLS; do not run the Compose Nginx container in Kubernetes.
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  host: selfservice.example.com
+  path: /
+  pathType: Prefix
+  tls:
+    enabled: true
+    secretName: foreman-selfservice-tls
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Additional environment variables applied to web, worker and scheduler.
+extraEnv: []
+
+# Optional raw volumes/mounts for environment-specific integrations.
+extraVolumes: []
+extraVolumeMounts: []
+
+# NetworkPolicy is disabled because LDAP, Entra, Foreman, PostgreSQL and Redis
+# destinations are environment-specific. A documented example is provided.
+networkPolicy:
+  enabled: false

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foreman-ca
+data:
+  foreman-ca.pem: |-
+    -----BEGIN CERTIFICATE-----
+    REPLACE_WITH_YOUR_CORPORATE_CA_CERTIFICATE
+    -----END CERTIFICATE-----

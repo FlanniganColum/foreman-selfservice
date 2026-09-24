@@ -1,0 +1,49 @@
+{{- if .Values.bootstrapAdmin.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "foreman-selfservice.fullname" . }}-bootstrap-admin
+  labels:
+    {{- include "foreman-selfservice.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bootstrap-admin
+  annotations:
+    "helm.sh/hook": post-install
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.bootstrapAdmin.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.bootstrapAdmin.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "foreman-selfservice.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bootstrap-admin
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "foreman-selfservice.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: bootstrap-admin
+          image: {{ include "foreman-selfservice.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["flask"]
+          args: ["--app", "wsgi:app", "portal", "bootstrap"]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          envFrom:
+            {{- include "foreman-selfservice.commonEnvFrom" . | nindent 12 }}
+          env:
+            {{- include "foreman-selfservice.commonEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

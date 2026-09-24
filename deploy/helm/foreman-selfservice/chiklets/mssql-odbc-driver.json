@@ -1,0 +1,102 @@
+{
+  "id": "install-mssql-odbc-driver",
+  "version": "1.0.1",
+  "name": "Install MSSQL ODBC Driver",
+  "description": "Install Microsoft SQL Server ODBC Driver and tools from Katello or Microsoft public repositories.",
+  "category": "Database",
+  "allowed_server_groups": [
+    "*"
+  ],
+  "icon": {
+    "type": "image",
+    "src": "mssql.svg",
+    "alt": "MS-ODBC"
+  },
+  "form_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "mssql_repo_source": {
+        "type": "string",
+        "title": "Repository Source",
+        "description": "Choose controlled Foreman/Katello content or the role-managed official Microsoft public repository. The repository URL and OS version are selected by the Ansible role and cannot be supplied by the user.",
+        "enum": [
+          "katello",
+          "microsoft"
+        ],
+        "default": "katello",
+        "x-ui": {
+          "group": "Repository",
+          "order": 10,
+          "enum_labels": {
+            "katello": "Foreman / Katello",
+            "microsoft": "Microsoft Public Repository"
+          }
+        }
+      },
+      "mssql_odbc_package": {
+        "type": "string",
+        "title": "ODBC Driver Package",
+        "default": "msodbcsql18",
+        "x-ui": {
+          "group": "Packages",
+          "order": 30
+        }
+      },
+      "mssql_tools_package": {
+        "type": "string",
+        "title": "MSSQL Tools Package",
+        "default": "mssql-tools18",
+        "x-ui": {
+          "group": "Packages",
+          "order": 40
+        }
+      },
+      "unixODBC_devel_package": {
+        "type": "string",
+        "title": "unixODBC Development Package",
+        "default": "unixODBC-devel",
+        "x-ui": {
+          "group": "Packages",
+          "order": 50
+        }
+      },
+      "mssql_package_state": {
+        "type": "string",
+        "title": "Package State",
+        "enum": [
+          "present",
+          "latest"
+        ],
+        "default": "present",
+        "x-ui": {
+          "group": "Installation",
+          "order": 60,
+          "enum_labels": {
+            "present": "Installed",
+            "latest": "Latest available"
+          }
+        }
+      }
+    },
+    "required": [
+      "mssql_repo_source",
+      "mssql_odbc_package",
+      "mssql_tools_package",
+      "unixODBC_devel_package",
+      "mssql_package_state"
+    ],
+    "additionalProperties": false
+  },
+  "foreman": {
+    "job_template_name": "SelfService - Install MSSQL ODBC Driver",
+    "input_map": {
+      "mssql_repo_source": "mssql_repo_source",
+      "mssql_odbc_package": "mssql_odbc_package",
+      "mssql_tools_package": "mssql_tools_package",
+      "unixODBC_devel_package": "unixODBC_devel_package",
+      "mssql_package_state": "mssql_package_state"
+    }
+  }
+}
+

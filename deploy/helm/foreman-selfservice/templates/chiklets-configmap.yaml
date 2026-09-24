@@ -1,0 +1,13 @@
+{{- if eq .Values.chiklets.mode "bundled" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "foreman-selfservice.fullname" . }}-chiklets
+  labels:
+    {{- include "foreman-selfservice.labels" . | nindent 4 }}
+data:
+{{- range $path, $_ := .Files.Glob "chiklets/*.json" }}
+  {{ base $path }}: |-
+{{ $.Files.Get $path | nindent 4 }}
+{{- end }}
+{{- end }}

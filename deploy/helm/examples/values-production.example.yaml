@@ -1,0 +1,80 @@
+image:
+  repository: registry.example.com/platform/foreman-selfservice
+  tag: "1.1.0"
+  # Strongly preferred after the image has been published:
+  # digest: "sha256:..."
+
+secrets:
+  existingSecret: foreman-selfservice-secrets
+
+config:
+  portalHostname: selfservice.example.com
+  sessionCookieSecure: true
+  trustProxyHeaders: true
+
+  auth:
+    defaultProvider: entra
+    enableEntra: true
+    enableLdap: true
+    enableLocal: true
+    allowIdentityAutoLink: false
+
+  entra:
+    tenantId: 00000000-0000-0000-0000-000000000000
+    clientId: 00000000-0000-0000-0000-000000000000
+    redirectUri: https://selfservice.example.com/auth/entra/callback
+    autoProvision: true
+
+  ldap:
+    uri: ldaps://ad.example.com:636
+    baseDn: DC=example,DC=com
+    bindDn: CN=svc_portal,OU=Service Accounts,DC=example,DC=com
+    userFilter: '(&(objectClass=user)(sAMAccountName={username}))'
+    usernameAttribute: sAMAccountName
+    emailAttribute: mail
+    displayNameAttribute: displayName
+    tlsValidate: true
+    autoProvision: true
+
+  foreman:
+    url: https://foreman.example.com
+    username: svc_foreman_portal
+    verifyTls: true
+    timeoutSeconds: 30
+    reconcileIntervalSeconds: 5
+    mock: false
+
+foremanCa:
+  existingConfigMap: foreman-ca
+  key: foreman-ca.pem
+
+chiklets:
+  # bundled is simplest. For operator-managed live JSON + image assets, use pvc.
+  mode: bundled
+
+web:
+  replicaCount: 2
+
+worker:
+  replicaCount: 2
+  concurrency: 2
+
+scheduler:
+  enabled: true
+
+ingress:
+  enabled: true
+  className: nginx
+  host: selfservice.example.com
+  annotations:
+    # Example when cert-manager is installed:
+    # cert-manager.io/cluster-issuer: corporate-ca
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+  tls:
+    enabled: true
+    secretName: foreman-selfservice-tls
+
+bootstrapAdmin:
+  # Enable only for the first installation if the Secret contains the
+  # BOOTSTRAP_ADMIN_* values. Disable it for ordinary upgrades.
+  enabled: false

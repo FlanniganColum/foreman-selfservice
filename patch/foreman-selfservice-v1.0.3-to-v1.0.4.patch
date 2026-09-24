@@ -1,0 +1,439 @@
+diff --git a/.env.example b/.env.example
+index a909ddd..4de435f 100644
+--- a/.env.example
++++ b/.env.example
+@@ -35,6 +35,8 @@ FOREMAN_API_TOKEN=
+ FOREMAN_VERIFY_TLS=true
+ # FOREMAN_CA_BUNDLE=/app/secrets/ca/foreman-ca.pem
+ FOREMAN_TIMEOUT_SECONDS=30
++# Background Foreman status reconciliation interval. Minimum: 2 seconds.
++FOREMAN_RECONCILE_INTERVAL_SECONDS=5
+ FOREMAN_MOCK=true
+ BOOTSTRAP_ADMIN_USERNAME=portal-admin
+ BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-strong-unique-password
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 2091b3b..3c2e3fc 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,14 @@
+ # Changelog
+ 
++## 1.0.4
++
++- Expanded the request Execution area into a full-width analysis workspace.
++- Added a large, resizable Foreman output console plus full-screen and copy-output controls.
++- Added automatic Foreman output refresh while jobs are queued/running without forcing the analyst scroll position.
++- Execution status now refreshes every 4 seconds in the browser and all progress steps update live.
++- Reduced the default background Foreman reconciliation interval from 15 seconds to 5 seconds; configurable with `FOREMAN_RECONCILE_INTERVAL_SECONDS`.
++- Live refresh stops automatically after a terminal request state while retaining manual output refresh.
++
+ ## 1.0.3
+ 
+ - Added Foreman compatibility fallback when `GET /api/job_invocations/:id/hosts` is unavailable (404), using hosts embedded in the job-invocation response.
+diff --git a/app/config.py b/app/config.py
+index a18ea43..4604eef 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -55,6 +55,7 @@ class Config:
+     FOREMAN_CA_BUNDLE = os.getenv("FOREMAN_CA_BUNDLE", "")
+     FOREMAN_VERIFY_TLS = env_bool("FOREMAN_VERIFY_TLS", True)
+     FOREMAN_TIMEOUT_SECONDS = int(os.getenv("FOREMAN_TIMEOUT_SECONDS", "30"))
++    FOREMAN_RECONCILE_INTERVAL_SECONDS = max(2.0, float(os.getenv("FOREMAN_RECONCILE_INTERVAL_SECONDS", "5")))
+     FOREMAN_MOCK = env_bool("FOREMAN_MOCK", True)
+ 
+     LOCAL_LOCKOUT_ATTEMPTS = int(os.getenv("LOCAL_LOCKOUT_ATTEMPTS", "5"))
+diff --git a/app/jobs/celery_app.py b/app/jobs/celery_app.py
+index e29a674..ac60eaf 100644
+--- a/app/jobs/celery_app.py
++++ b/app/jobs/celery_app.py
+@@ -28,7 +28,7 @@ def make_celery(app):
+         beat_schedule={
+             "reconcile-active-foreman-jobs": {
+                 "task": "app.jobs.tasks.reconcile_active_jobs",
+-                "schedule": 15.0,
++                "schedule": app.config["FOREMAN_RECONCILE_INTERVAL_SECONDS"],
+             },
+             "recover-approved-unsubmitted-jobs": {
+                 "task": "app.jobs.tasks.recover_unqueued_requests",
+diff --git a/app/static/css/app.css b/app/static/css/app.css
+index 20b1e5c..a6a2594 100644
+--- a/app/static/css/app.css
++++ b/app/static/css/app.css
+@@ -3,3 +3,7 @@
+ .audit-filter{display:grid;grid-template-columns:1.2fr 1fr 1.5fr auto;gap:12px;align-items:end}.json-cell{white-space:pre-wrap;max-width:420px;display:block}.toggle-row{display:flex;align-items:center;gap:10px;font-weight:500}.toggle-row input{width:auto}@media(max-width:900px){.audit-filter{grid-template-columns:1fr}}
+ 
+ .job-output{white-space:pre-wrap;word-break:break-word;background:#0d2338;color:#dbe9f5;border-radius:10px;padding:14px;margin-top:12px;max-height:520px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
++
++/* v1.0.4 execution workspace */
++.request-card,.execution-card{grid-column:1/-1}.execution-card{position:relative;top:auto;align-self:stretch}.execution-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:18px}.execution-heading h2{margin:5px 0 6px;color:var(--navy);font-size:28px}.execution-refresh-state{margin:0}.execution-actions,.output-actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.execution-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:16px 0 22px}.execution-summary>div{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:#f9fbfd}.execution-summary span{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}.execution-summary b{display:block;overflow-wrap:anywhere}.execution-card .progress-steps{grid-template-columns:repeat(5,minmax(120px,1fr));gap:0;margin:20px 0 26px;overflow-x:auto}.execution-card .progress-steps div{border-left:0;border-top:4px solid #d9e2ea;padding:12px 12px 10px;min-width:120px}.execution-card .progress-steps .done{border-color:var(--green);background:#f7fcfa;color:#245c49}.execution-card .progress-steps .active{border-color:var(--blue);background:#f0f7fd;color:var(--blue)}.execution-card .progress-steps .failed{border-color:var(--red);background:#fff6f6;color:#9c2e2e}.output-toolbar{display:flex;align-items:center;justify-content:space-between;gap:14px;padding-top:4px}.output-toolbar>div:first-child{display:grid;gap:3px}.output-toolbar strong{color:var(--navy)}.job-output{white-space:pre;word-break:normal;background:#0d2338;color:#dbe9f5;border:1px solid #1b405f;border-radius:12px;padding:18px;margin-top:12px;min-height:520px;height:58vh;max-height:72vh;overflow:auto;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-size:13px;line-height:1.55;tab-size:4;box-shadow:inset 0 0 0 1px rgba(255,255,255,.02)}.job-output:focus{outline:3px solid rgba(11,105,183,.18)}.output-placeholder{border:1px dashed #bacbd9;border-radius:12px;padding:34px;text-align:center;background:#f9fbfd;margin-top:12px}.execution-card.fullscreen{position:fixed;inset:18px;z-index:1000;margin:0;overflow:auto;box-shadow:0 24px 80px rgba(8,35,58,.28);border-radius:16px}.execution-card.fullscreen .job-output{height:calc(100vh - 330px);max-height:none;min-height:360px;resize:none}body.execution-fullscreen-open{overflow:hidden}.status.cancelled{background:#f3e7fa;color:#71408a}
++@media(max-width:900px){.execution-summary{grid-template-columns:1fr}.execution-heading,.output-toolbar{align-items:stretch;flex-direction:column}.output-actions{justify-content:flex-start}.execution-card .progress-steps{grid-template-columns:1fr}.execution-card .progress-steps div{border-top:0;border-left:4px solid #d9e2ea}.job-output{height:55vh;min-height:420px}.execution-card.fullscreen{inset:8px}.execution-card.fullscreen .job-output{height:calc(100vh - 390px)}}
+diff --git a/app/static/js/app.js b/app/static/js/app.js
+index 6050071..34728b6 100644
+--- a/app/static/js/app.js
++++ b/app/static/js/app.js
+@@ -1,51 +1,185 @@
+ (function(){
+   const panel=document.querySelector("[data-status-url]");
+   if(!panel)return;
+-  const url=panel.dataset.statusUrl;
++
++  const statusUrl=panel.dataset.statusUrl;
+   const terminal=new Set(["succeeded","failed","cancelled","rejected"]);
+-  async function poll(){
++  const active=new Set(["approved","queued","running"]);
++  const statusIntervalMs=4000;
++  const outputIntervalMs=8000;
++  let currentStatus=panel.dataset.currentStatus||"";
++  let hasForemanJob=panel.dataset.hasForemanJob==="true";
++  let statusTimer=null;
++  let outputTimer=null;
++  let outputLoading=false;
++
++  const statusPill=document.getElementById("request-status");
++  const foremanJob=document.getElementById("foreman-job");
++  const executionState=document.getElementById("execution-state");
++  const lastPolled=document.getElementById("last-polled");
++  const refreshState=document.getElementById("execution-refresh-state");
++  const errorBox=document.getElementById("execution-error");
++  const outputButton=document.getElementById("load-output");
++  const outputSection=document.getElementById("output-section");
++  const outputPlaceholder=document.getElementById("output-placeholder");
++  const outputBox=document.getElementById("job-output");
++  const outputRefreshState=document.getElementById("output-refresh-state");
++  const outputLastRefreshed=document.getElementById("output-last-refreshed");
++  const copyButton=document.getElementById("copy-output");
++  const fullscreenButton=document.getElementById("toggle-execution-fullscreen");
++
++  function textStatus(value){
++    return (value||"").replaceAll("_"," ");
++  }
++
++  function setStep(name,state){
++    const el=document.querySelector(`[data-step="${name}"]`);
++    if(!el)return;
++    el.classList.remove("done","active","failed");
++    if(state)el.classList.add(state);
++  }
++
++  function updateSteps(status,foremanId){
++    setStep("submitted","done");
++    setStep("approved",["approved","queued","running","succeeded","failed","cancelled"].includes(status)?"done":status==="rejected"?"failed":"");
++    setStep("foreman",foremanId?"done":"");
++
++    if(status==="running")setStep("ansible","active");
++    else if(status==="succeeded")setStep("ansible","done");
++    else if(status==="failed"||status==="cancelled")setStep("ansible","failed");
++    else setStep("ansible","");
++
++    if(status==="succeeded")setStep("completed","done");
++    else if(status==="failed"||status==="cancelled"||status==="rejected")setStep("completed","failed");
++    else setStep("completed","");
++  }
++
++  function updateStatusUI(d){
++    currentStatus=d.status||currentStatus;
++    hasForemanJob=Boolean(d.foreman_job_id);
++    panel.dataset.currentStatus=currentStatus;
++    panel.dataset.hasForemanJob=hasForemanJob?"true":"false";
++
++    if(statusPill){
++      statusPill.textContent=textStatus(currentStatus);
++      statusPill.className="status "+currentStatus;
++    }
++    if(foremanJob)foremanJob.textContent=d.foreman_job_id||"Waiting to submit";
++    if(outputSection)outputSection.hidden=!hasForemanJob;
++    if(outputPlaceholder)outputPlaceholder.hidden=hasForemanJob;
++    if(executionState)executionState.textContent=d.status_label||currentStatus;
++    if(lastPolled)lastPolled.textContent=d.last_polled_at||"Not yet polled";
++    if(errorBox){
++      if(d.error){errorBox.hidden=false;errorBox.textContent=d.error;}
++      else{errorBox.hidden=true;errorBox.textContent="";}
++    }
++    updateSteps(currentStatus,d.foreman_job_id);
++
++    if(refreshState){
++      refreshState.textContent=terminal.has(currentStatus)
++        ? "Execution has reached a terminal state; live status refresh is paused."
++        : "Live status refresh is active (every 4 seconds).";
++    }
++    if(outputRefreshState){
++      outputRefreshState.textContent=active.has(currentStatus)&&hasForemanJob
++        ? "Auto-refreshing every 8 seconds"
++        : terminal.has(currentStatus)?"Final output":"Waiting for execution";
++    }
++  }
++
++  async function loadOutput(automatic=false){
++    if(!outputButton||!outputBox||outputLoading)return;
++    outputLoading=true;
++    if(!automatic){
++      outputButton.disabled=true;
++      outputButton.textContent="Refreshing…";
++    }
++    const nearBottom=(outputBox.scrollHeight-outputBox.scrollTop-outputBox.clientHeight)<80;
+     try{
+-      const r=await fetch(url,{headers:{"Accept":"application/json"}});
+-      if(!r.ok)return;
++      const r=await fetch(outputButton.dataset.outputUrl,{headers:{Accept:"application/json"},cache:"no-store"});
++      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+       const d=await r.json();
+-      const s=document.getElementById("request-status");
+-      if(s){s.textContent=d.status.replaceAll("_"," ");s.className="status "+d.status;}
+-      const f=document.getElementById("foreman-job");if(f)f.textContent=d.foreman_job_id||"Waiting to submit";
+-      const e=document.getElementById("execution-state");if(e)e.textContent=d.status_label||d.status;
+-      const l=document.getElementById("last-polled");if(l)l.textContent=d.last_polled_at||"Not yet polled";
+-      if((d.status==="failed"||d.status==="cancelled")&&window.loadForemanOutput)window.loadForemanOutput(true);
+-      if(!terminal.has(d.status))setTimeout(poll,5000);
+-    }catch(e){setTimeout(poll,10000)}
+-  }
+-  setTimeout(poll,3000);
+-})();
++      const rendered=d.ready
++        ? d.outputs.map(x=>`=== ${x.host}${x.status?" ["+x.status+"]":""} ===\n${typeof x.output==="string"?x.output:JSON.stringify(x.output,null,2)}`).join("\n\n")
++        : "Output is not available yet.";
++      outputBox.textContent=rendered;
++      if(nearBottom)outputBox.scrollTop=outputBox.scrollHeight;
++      if(outputLastRefreshed)outputLastRefreshed.textContent=`Updated ${new Date().toLocaleTimeString()}`;
++    }catch(e){
++      if(!automatic)outputBox.textContent="Unable to retrieve Foreman output.";
++      if(outputLastRefreshed)outputLastRefreshed.textContent="Last refresh failed";
++    }finally{
++      outputLoading=false;
++      if(!automatic){
++        outputButton.disabled=false;
++        outputButton.textContent="Refresh now";
++      }
++    }
++  }
+ 
+-(function(){
+-  const b=document.getElementById("load-output");
+-  if(!b)return;
+-  let loading=false;
+-  async function loadOutput(automatic){
+-    if(loading)return;
+-    loading=true;
+-    b.disabled=true;
+-    b.textContent="Loading output…";
+-    const box=document.getElementById("job-output");
++  function scheduleOutput(){
++    clearTimeout(outputTimer);
++    if(!outputButton||!hasForemanJob)return;
++    if(active.has(currentStatus)){
++      outputTimer=setTimeout(async()=>{
++        await loadOutput(true);
++        scheduleOutput();
++      },outputIntervalMs);
++    }
++  }
++
++  async function pollStatus(){
+     try{
+-      const r=await fetch(b.dataset.outputUrl,{headers:{Accept:"application/json"}});
++      const r=await fetch(statusUrl,{headers:{"Accept":"application/json"},cache:"no-store"});
++      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+       const d=await r.json();
+-      box.hidden=false;
+-      box.textContent=d.ready?d.outputs.map(x=>`=== ${x.host}${x.status?" ["+x.status+"]":""} ===\n${typeof x.output==="string"?x.output:JSON.stringify(x.output,null,2)}`).join("\n\n"):"Output is not available yet.";
++      const previousStatus=currentStatus;
++      const previousHasJob=hasForemanJob;
++      updateStatusUI(d);
++
++      if(outputButton&&hasForemanJob&&(!previousHasJob||previousStatus!==currentStatus||terminal.has(currentStatus))){
++        await loadOutput(true);
++      }
++      scheduleOutput();
++
++      clearTimeout(statusTimer);
++      if(!terminal.has(currentStatus))statusTimer=setTimeout(pollStatus,statusIntervalMs);
+     }catch(e){
+-      box.hidden=false;
+-      box.textContent="Unable to retrieve Foreman output.";
+-    }finally{
+-      loading=false;
+-      b.disabled=false;
+-      b.textContent="Refresh Foreman output";
++      if(refreshState)refreshState.textContent="Live refresh temporarily unavailable; retrying…";
++      clearTimeout(statusTimer);
++      statusTimer=setTimeout(pollStatus,10000);
+     }
+   }
+-  window.loadForemanOutput=loadOutput;
+-  b.addEventListener("click",()=>loadOutput(false));
+-  const current=document.getElementById("request-status");
+-  if(current&&(current.classList.contains("failed")||current.classList.contains("cancelled")))loadOutput(true);
++
++  if(outputButton){
++    outputButton.addEventListener("click",()=>loadOutput(false));
++    if(hasForemanJob)loadOutput(true);
++  }
++
++  if(copyButton&&outputBox){
++    copyButton.addEventListener("click",async()=>{
++      try{
++        await navigator.clipboard.writeText(outputBox.textContent||"");
++        const original=copyButton.textContent;
++        copyButton.textContent="Copied";
++        setTimeout(()=>{copyButton.textContent=original;},1200);
++      }catch(e){
++        copyButton.textContent="Copy failed";
++        setTimeout(()=>{copyButton.textContent="Copy";},1200);
++      }
++    });
++  }
++
++  if(fullscreenButton){
++    fullscreenButton.addEventListener("click",()=>{
++      const enabled=panel.classList.toggle("fullscreen");
++      document.body.classList.toggle("execution-fullscreen-open",enabled);
++      fullscreenButton.textContent=enabled?"Exit full screen":"Full screen";
++      if(enabled&&outputBox)outputBox.focus();
++    });
++  }
++
++  updateSteps(currentStatus,hasForemanJob);
++  scheduleOutput();
++  statusTimer=setTimeout(pollStatus,1000);
+ })();
+diff --git a/app/templates/requests/detail.html b/app/templates/requests/detail.html
+index f535573..d12644a 100644
+--- a/app/templates/requests/detail.html
++++ b/app/templates/requests/detail.html
+@@ -1 +1,104 @@
+-{% extends "base.html" %}{% block content %}<a class="back" href="{{ url_for('requests.index') }}">← Request history</a><div class="page-heading"><div><div class="eyebrow">{{ item.request_number }}</div><h1>{{ item.chiklet_name }}</h1><p>Target: <strong>{{ item.target_snapshot.name }}</strong></p></div><span id="request-status" class="status {{ item.status }}">{{ item.status|replace('_',' ') }}</span></div><div class="detail-layout"><section class="card"><h2>Request</h2><div class="kv-grid"><div><span>Requested by</span><b>{{ item.requested_by.display_name or item.requested_by.username }}</b></div><div><span>Server group</span><b>{{ item.server_group.name }}</b></div><div><span>Submitted</span><b>{{ item.submitted_at.strftime('%Y-%m-%d %H:%M:%S') }}</b></div><div><span>Version</span><b>{{ item.chiklet_version }}</b></div></div><h3>Parameters</h3><div class="params">{% for key,value in item.form_data.items() %}<div><span>{{ key|replace('_',' ') }}</span><code>{{ value }}</code></div>{% endfor %}</div>{% if item.justification %}<h3>Justification</h3><p>{{ item.justification }}</p>{% endif %}<h3>Approval trail</h3>{% for a in item.approvals %}<div class="timeline-row"><span class="dot"></span><div><b>{{ a.decision|title }}</b> by {{ a.approver.display_name or a.approver.username }}<small>{{ a.decided_at.strftime('%Y-%m-%d %H:%M:%S') }}{% if a.comment %} · {{ a.comment }}{% endif %}</small></div></div>{% else %}<p class="muted">Awaiting an authorised approver.</p>{% endfor %}</section><aside class="card side-card" data-status-url="{{ url_for('api.request_status',request_id=item.id) }}"><h3>Execution</h3>{% if item.execution %}<dl><dt>Foreman job</dt><dd id="foreman-job">{{ item.execution.foreman_job_id or 'Waiting to submit' }}</dd><dt>State</dt><dd id="execution-state">{{ item.execution.status_label or item.execution.status }}</dd><dt>Last check</dt><dd id="last-polled">{{ item.execution.last_polled_at or 'Not yet polled' }}</dd></dl>{% else %}<p class="muted">Foreman execution is created only after approval.</p>{% endif %}<div class="progress-steps"><div class="done">Request submitted</div><div class="{% if item.approved_at %}done{% endif %}">Approved</div><div class="{% if item.execution and item.execution.foreman_job_id %}done{% endif %}">Sent to Foreman</div><div class="{% if item.status == 'running' %}active{% elif item.status in ['succeeded','failed','cancelled'] %}done{% endif %}">Ansible execution</div><div class="{% if item.status in ['succeeded','failed','cancelled'] %}done{% endif %}">Completed</div></div>{% if item.execution and item.execution.foreman_job_id %}<button type="button" class="button subtle wide" id="load-output" data-output-url="{{ url_for('api.request_output',request_id=item.id) }}">Load Foreman output</button><div id="job-output" class="job-output" hidden></div>{% endif %}{% if item.execution and item.execution.error_message %}<div class="alert danger">{{ item.execution.error_message }}</div>{% endif %}</aside></div>{% endblock %}
++{% extends "base.html" %}
++{% block content %}
++<a class="back" href="{{ url_for('requests.index') }}">← Request history</a>
++
++<div class="page-heading">
++  <div>
++    <div class="eyebrow">{{ item.request_number }}</div>
++    <h1>{{ item.chiklet_name }}</h1>
++    <p>Target: <strong>{{ item.target_snapshot.name }}</strong></p>
++  </div>
++  <span id="request-status" class="status {{ item.status }}">{{ item.status|replace('_',' ') }}</span>
++</div>
++
++<div class="detail-layout">
++  <section class="card request-card">
++    <h2>Request</h2>
++    <div class="kv-grid">
++      <div><span>Requested by</span><b>{{ item.requested_by.display_name or item.requested_by.username }}</b></div>
++      <div><span>Server group</span><b>{{ item.server_group.name }}</b></div>
++      <div><span>Submitted</span><b>{{ item.submitted_at.strftime('%Y-%m-%d %H:%M:%S') }}</b></div>
++      <div><span>Version</span><b>{{ item.chiklet_version }}</b></div>
++    </div>
++
++    <h3>Parameters</h3>
++    <div class="params">
++      {% for key,value in item.form_data.items() %}
++      <div><span>{{ key|replace('_',' ') }}</span><code>{{ value }}</code></div>
++      {% endfor %}
++    </div>
++
++    {% if item.justification %}
++    <h3>Justification</h3>
++    <p>{{ item.justification }}</p>
++    {% endif %}
++
++    <h3>Approval trail</h3>
++    {% for a in item.approvals %}
++    <div class="timeline-row">
++      <span class="dot"></span>
++      <div>
++        <b>{{ a.decision|title }}</b> by {{ a.approver.display_name or a.approver.username }}
++        <small>{{ a.decided_at.strftime('%Y-%m-%d %H:%M:%S') }}{% if a.comment %} · {{ a.comment }}{% endif %}</small>
++      </div>
++    </div>
++    {% else %}
++    <p class="muted">Awaiting an authorised approver.</p>
++    {% endfor %}
++  </section>
++
++  <section
++    class="card execution-card"
++    data-status-url="{{ url_for('api.request_status',request_id=item.id) }}"
++    data-current-status="{{ item.status }}"
++    data-has-foreman-job="{{ 'true' if item.execution and item.execution.foreman_job_id else 'false' }}"
++  >
++    <div class="execution-heading">
++      <div>
++        <div class="eyebrow">LIVE EXECUTION</div>
++        <h2>Execution</h2>
++        <p class="muted execution-refresh-state" id="execution-refresh-state">Status refresh is active while this request is running.</p>
++      </div>
++      <div class="execution-actions">
++        <button type="button" class="button subtle small" id="toggle-execution-fullscreen">Full screen</button>
++      </div>
++    </div>
++
++    <div class="execution-summary">
++      <div><span>Foreman job</span><b id="foreman-job">{{ item.execution.foreman_job_id if item.execution and item.execution.foreman_job_id else 'Waiting to submit' }}</b></div>
++      <div><span>State</span><b id="execution-state">{{ (item.execution.status_label or item.execution.status) if item.execution else item.status }}</b></div>
++      <div><span>Last status check</span><b id="last-polled">{{ item.execution.last_polled_at if item.execution and item.execution.last_polled_at else 'Not yet polled' }}</b></div>
++    </div>
++
++    <div class="progress-steps" id="execution-steps">
++      <div data-step="submitted" class="done">Request submitted</div>
++      <div data-step="approved" class="{% if item.approved_at %}done{% endif %}">Approved</div>
++      <div data-step="foreman" class="{% if item.execution and item.execution.foreman_job_id %}done{% endif %}">Sent to Foreman</div>
++      <div data-step="ansible" class="{% if item.status == 'running' %}active{% elif item.status in ['succeeded','failed','cancelled'] %}done{% endif %}">Ansible execution</div>
++      <div data-step="completed" class="{% if item.status in ['succeeded','failed','cancelled'] %}done{% endif %}">Completed</div>
++    </div>
++
++    <div id="output-section"{% if not (item.execution and item.execution.foreman_job_id) %} hidden{% endif %}>
++      <div class="output-toolbar">
++        <div>
++          <strong>Foreman output</strong>
++          <span class="muted" id="output-refresh-state">Auto-refreshing while active</span>
++        </div>
++        <div class="output-actions">
++          <span class="muted" id="output-last-refreshed">Not loaded yet</span>
++          <button type="button" class="button subtle small" id="copy-output">Copy</button>
++          <button type="button" class="button subtle small" id="load-output" data-output-url="{{ url_for('api.request_output',request_id=item.id) }}">Refresh now</button>
++        </div>
++      </div>
++      <pre id="job-output" class="job-output" tabindex="0">Waiting for Foreman output…</pre>
++    </div>
++    <div id="output-placeholder" class="output-placeholder muted"{% if item.execution and item.execution.foreman_job_id %} hidden{% endif %}>Foreman output will appear here after the request is approved and submitted.</div>
++
++    {% if item.execution and item.execution.error_message %}
++    <div class="alert danger" id="execution-error">{{ item.execution.error_message }}</div>
++    {% else %}
++    <div class="alert danger" id="execution-error" hidden></div>
++    {% endif %}
++  </section>
++</div>
++{% endblock %}
+diff --git a/tests/test_execution_ui.py b/tests/test_execution_ui.py
+new file mode 100644
+index 0000000..345f5c0
+--- /dev/null
++++ b/tests/test_execution_ui.py
+@@ -0,0 +1,26 @@
++from pathlib import Path
++
++
++def test_execution_template_has_live_refresh_hooks():
++    template = Path("app/templates/requests/detail.html").read_text()
++    assert 'data-status-url=' in template
++    assert 'data-step="approved"' in template
++    assert 'data-step="foreman"' in template
++    assert 'data-step="ansible"' in template
++    assert 'id="job-output"' in template
++    assert 'id="toggle-execution-fullscreen"' in template
++
++
++def test_execution_javascript_has_periodic_refresh():
++    script = Path("app/static/js/app.js").read_text()
++    assert "statusIntervalMs=4000" in script
++    assert "outputIntervalMs=8000" in script
++    assert "scheduleOutput" in script
++    assert "updateSteps" in script
++
++
++def test_execution_css_has_large_output_workspace():
++    css = Path("app/static/css/app.css").read_text()
++    assert ".execution-card.fullscreen" in css
++    assert "min-height:520px" in css
++    assert "resize:vertical" in css

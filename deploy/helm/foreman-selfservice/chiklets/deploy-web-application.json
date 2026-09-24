@@ -1,0 +1,74 @@
+{
+  "id": "deploy-web-application",
+  "version": "1.0.0",
+  "name": "Deploy Web Application",
+  "description": "Deploy a versioned application package to an authorised Linux application server.",
+  "category": "Application Deployment",
+  "icon": "\u2b21",
+  "allowed_server_groups": [
+    "demo",
+    "web-dev",
+    "web-uat",
+    "web-prod"
+  ],
+  "form_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "application": {
+        "type": "string",
+        "title": "Application",
+        "enum": [
+          "payments-api",
+          "customer-portal",
+          "orders-service"
+        ],
+        "description": "Application package to deploy."
+      },
+      "version": {
+        "type": "string",
+        "title": "Release version",
+        "minLength": 1,
+        "maxLength": 80,
+        "placeholder": "4.18.2"
+      },
+      "environment": {
+        "type": "string",
+        "title": "Environment",
+        "enum": [
+          "Development",
+          "UAT",
+          "Production"
+        ],
+        "default": "UAT"
+      },
+      "restart_service": {
+        "type": "boolean",
+        "title": "Restart service",
+        "default": true,
+        "description": "Restart the service after package deployment."
+      },
+      "healthcheck_path": {
+        "type": "string",
+        "title": "Health-check path",
+        "default": "/health"
+      }
+    },
+    "required": [
+      "application",
+      "version",
+      "environment"
+    ],
+    "additionalProperties": false
+  },
+  "foreman": {
+    "job_template_name": "SelfService - Deploy Web Application",
+    "input_map": {
+      "application": "application",
+      "release_version": "version",
+      "environment": "environment",
+      "restart_service": "restart_service",
+      "healthcheck_path": "healthcheck_path"
+    }
+  }
+}
