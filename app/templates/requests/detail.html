@@ -24,7 +24,7 @@
     <h3>Parameters</h3>
     <div class="params">
       {% for key,value in item.form_data.items() %}
-      <div><span>{{ key|replace('_',' ') }}</span><code>{{ value }}</code></div>
+      <div><span>{{ key|replace('_',' ') }}</span><code>{{ '[Stored securely]' if (item.config_snapshot.form_schema.properties.get(key) or {}).get('x-sensitive') else value }}</code></div>
       {% endfor %}
     </div>
 

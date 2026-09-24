@@ -58,6 +58,14 @@ class Config:
     FOREMAN_RECONCILE_INTERVAL_SECONDS = max(2.0, float(os.getenv("FOREMAN_RECONCILE_INTERVAL_SECONDS", "5")))
     FOREMAN_MOCK = env_bool("FOREMAN_MOCK", True)
 
+    VAULT_ADDR = os.getenv("VAULT_ADDR", "")
+    VAULT_TOKEN = os.getenv("VAULT_TOKEN", "")
+    VAULT_TOKEN_FILE = os.getenv("VAULT_TOKEN_FILE", "")
+    VAULT_CA_BUNDLE = os.getenv("VAULT_CA_BUNDLE", "")
+    VAULT_KV_MOUNT = os.getenv("VAULT_KV_MOUNT", "portal")
+    VAULT_KV_PREFIX = os.getenv("VAULT_KV_PREFIX", "requests")
+    VAULT_TIMEOUT_SECONDS = int(os.getenv("VAULT_TIMEOUT_SECONDS", "10"))
+
     LOCAL_LOCKOUT_ATTEMPTS = int(os.getenv("LOCAL_LOCKOUT_ATTEMPTS", "5"))
     LOCAL_LOCKOUT_MINUTES = int(os.getenv("LOCAL_LOCKOUT_MINUTES", "15"))
 

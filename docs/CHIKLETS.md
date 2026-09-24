@@ -114,6 +114,7 @@ The portal infers controls from JSON Schema:
 | `format: date-time` | date/time picker |
 | `format: multiline` or `format: textarea` | textarea |
 | `readOnly: true` | displayed as fixed configuration |
+| `x-sensitive: true` string | password control, or secret textarea with `x-ui.widget: secret-textarea` |
 
 Defaults are initial values, not locks. A user may change a default unless the field has `readOnly: true`.
 
@@ -123,7 +124,7 @@ Defaults are initial values, not locks. A user may change a default unless the f
 
 Supported keys:
 
-- `widget`: `text`, `textarea`, `select`, `multiselect`, `toggle`, `number`, `date`, or `datetime-local`.
+- `widget`: `text`, `textarea`, `select`, `multiselect`, `toggle`, `number`, `date`, `datetime-local`, `password`, or `secret-textarea`.
 - `group`: section heading in the form.
 - `order`: numeric field ordering within a section.
 - `width`: `full` or `half`.
@@ -146,6 +147,21 @@ Every `input_map` source must exist in `form_schema.properties`. Invalid Chiklet
 
 ## Security
 
-Raw passwords and secret fields are intentionally prohibited from Chiklet forms because submitted values become part of the immutable request/audit history. Pass secret references and resolve the actual secret in Foreman, Ansible Vault, or the organisation's secret-management platform.
+Sensitive string fields may be entered in the portal with `x-sensitive: true`. The portal writes their values to HashiCorp Vault KV v2 at `<VAULT_KV_MOUNT>/<VAULT_KV_PREFIX>/<request UUID>` and retains only `vault-kv2://<mount>/<prefix>/<request UUID>#<field>` references in the request history and Foreman inputs. A sensitive field must be editable, have no default or enum, and be listed in `foreman.input_map`. The portal does not read secrets back. The Foreman job template must resolve references with a **separate read-only Vault identity** and use Ansible `no_log: true` on every task that handles secret material. Never print resolved values, enable HTTP request-body logging, or include them in justifications and other ordinary text fields. Foreman output is displayed in the portal, so `no_log` on the job is essential.
+
+Example field and mapping:
+
+```json
+"ssh_private_key": {"type": "string", "title": "SSH private key", "x-sensitive": true,
+                    "x-ui": {"widget": "secret-textarea"}}
+```
+
+```json
+"input_map": {"ssh_private_key_ref": "ssh_private_key"}
+```
+
+Set `VAULT_ADDR` to an HTTPS Vault endpoint and `VAULT_TOKEN_FILE` to a mounted file containing the portal token (or `VAULT_TOKEN` for development). Set `VAULT_CA_BUNDLE` for a private CA; `VAULT_KV_MOUNT` and `VAULT_KV_PREFIX` select the KV v2 location. Grant the portal token `create` and `update` on `<mount>/data/<prefix>/*`; grant the Foreman job identity `read` on that path. Keep the Foreman read credential outside the portal and use short-lived identities where possible. Configure retention/deletion in Vault for rejected, completed and orphaned submissions. A failed database commit after a successful Vault write can leave an orphaned secret at the request UUID path. Run the deployment behind HTTPS, redact request bodies at the reverse proxy, WAF, APM and error reporter. An SSH **public** key need not be secret, but a private key must use this path; prefer users supplying public keys when possible.
+
+Vault KV v2 response errors are deliberately reduced to generic messages. The raw secret is never repopulated in a form after validation failure. Existing Chiklets without sensitive fields need no Vault configuration.
 
 `readOnly` is enforced server-side. Editing browser HTML cannot override the value defined by the Chiklet.
