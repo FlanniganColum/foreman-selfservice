@@ -19,6 +19,34 @@
         "existingSecret": {"type": "string", "minLength": 1}
       }
     },
+    "redis": {
+      "type": "object",
+      "required": ["enabled", "image", "existingSecret", "port", "persistence"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "existingSecret": {"type": "string", "minLength": 1},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "maxmemory": {"type": "string", "minLength": 1},
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag", "pullPolicy"],
+          "properties": {
+            "repository": {"type": "string", "minLength": 1},
+            "tag": {"type": "string", "minLength": 1},
+            "pullPolicy": {"type": "string", "enum": ["Always", "IfNotPresent", "Never"]}
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "required": ["enabled", "size"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "size": {"type": "string", "minLength": 1},
+            "storageClass": {"type": "string"}
+          }
+        }
+      }
+    },
     "chiklets": {
       "type": "object",
       "required": ["mode", "mountPath"],

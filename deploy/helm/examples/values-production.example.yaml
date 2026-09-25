@@ -7,6 +7,13 @@ image:
 secrets:
   existingSecret: foreman-selfservice-secrets
 
+redis:
+  enabled: true
+  existingSecret: foreman-selfservice-redis-auth
+  persistence:
+    enabled: true
+    size: 8Gi
+
 config:
   portalHostname: selfservice.example.com
   sessionCookieSecure: true
