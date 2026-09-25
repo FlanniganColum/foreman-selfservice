@@ -7,3 +7,7 @@ htmlcov/
 secrets/tls/*
 secrets/ca/*
 !secrets/**/.gitkeep
+
+## Ignore build script
+build.sh
+VERSION
