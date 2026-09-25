@@ -2,7 +2,7 @@ apiVersion: v2
 name: foreman-selfservice
 description: Production Helm chart for the Foreman Self-Service Portal
 type: application
-version: 1.1.0
+version: 1.1.1
 appVersion: "1.1.0"
 keywords:
   - foreman
@@ -12,6 +12,8 @@ keywords:
   - flask
 annotations:
   artifacthub.io/changes: |
+    - kind: added
+      description: Optional persistent Redis StatefulSet and Service with ACL authentication; enabled by default.
     - kind: added
       description: Production Kubernetes deployment with separate web, worker and singleton scheduler workloads.
     - kind: added

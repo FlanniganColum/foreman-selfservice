@@ -24,7 +24,7 @@ Development/testing:
 
 Production Kubernetes:
 
-`Browser -> Ingress/TLS -> Service -> web Pods -> external PostgreSQL + Redis -> worker/scheduler -> Foreman -> Ansible`
+`Browser -> Ingress/TLS -> Service -> web Pods -> external PostgreSQL + chart Redis -> worker/scheduler -> Foreman -> Ansible`
 
 This is a modular monolith plus independently scalable worker processes. It avoids premature microservice complexity while preserving clear module and runtime boundaries.
 
@@ -43,7 +43,7 @@ It includes PostgreSQL, Redis and Nginx for a self-contained environment.
 
 ### Production - Helm / Kubernetes
 
-Use `deploy/helm/foreman-selfservice`. The production chart uses separate web, worker and singleton scheduler Deployments, an Ingress, a pre-install/pre-upgrade migration Job, Kubernetes security contexts, and external PostgreSQL/Redis.
+Use `deploy/helm/foreman-selfservice`. The production chart uses separate web, worker and singleton scheduler Deployments, an Ingress, a pre-install/pre-upgrade migration Job, Kubernetes security contexts, external PostgreSQL, and an optional bundled Redis StatefulSet (enabled by default).
 
 Start with:
 

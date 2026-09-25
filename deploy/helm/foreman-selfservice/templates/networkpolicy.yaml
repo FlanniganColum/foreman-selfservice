@@ -1,7 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
 # This baseline policy blocks unsolicited ingress to non-web Pods while leaving
 # egress unrestricted. Add environment-specific egress restrictions only after
-# accounting for DNS, PostgreSQL, Redis, Foreman, LDAP/AD and Entra endpoints.
+# accounting for DNS, PostgreSQL, Foreman, LDAP/AD and Entra endpoints.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -18,4 +18,13 @@ spec:
     - ports:
         - protocol: TCP
           port: 8000
+    {{- if .Values.redis.enabled }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "foreman-selfservice.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.redis.port }}
+    {{- end }}
 {{- end }}

@@ -1,8 +1,7 @@
 # Foreman Self-Service Portal - production defaults
 #
-# The chart deliberately does NOT deploy PostgreSQL or Redis. In production,
-# point DATABASE_URL / REDIS_URL / CELERY_* at managed or separately operated
-# services via secrets.existingSecret.
+# PostgreSQL stays external. Redis is deployed by default and can be disabled
+# in favor of an external service. Connection URLs remain in the app Secret.
 
 nameOverride: ""
 fullnameOverride: ""
@@ -27,6 +26,32 @@ serviceAccount:
 # before ordinary chart resources are created.
 secrets:
   existingSecret: foreman-selfservice-secrets
+
+# Single-node Redis for sessions and Celery. Keep persistence enabled to retain
+# queued jobs across Pod restarts. Use an external HA Redis for higher availability.
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "8-alpine"
+    pullPolicy: IfNotPresent
+  # Pre-create this Secret with a `users.acl` key containing an ACL line such as
+  # `user default on >LONG_RANDOM_PASSWORD ~* &* +@all`.
+  existingSecret: foreman-selfservice-redis-auth
+  port: 6379
+  # Leave headroom below resources.limits.memory for Redis overhead.
+  maxmemory: 384mb
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClass: "" # Empty selects the cluster's default StorageClass.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
 
 config:
   portalHostname: selfservice.example.com
@@ -212,7 +237,7 @@ extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []
 
-# NetworkPolicy is disabled because LDAP, Entra, Foreman, PostgreSQL and Redis
-# destinations are environment-specific. A documented example is provided.
+# NetworkPolicy is disabled because LDAP, Entra, Foreman and PostgreSQL egress
+# destinations are environment-specific. When enabled, it allows in-chart Redis.
 networkPolicy:
   enabled: false
