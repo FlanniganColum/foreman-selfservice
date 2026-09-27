@@ -46,9 +46,11 @@ def submit(chiklet_id):
     if bound_values is None:
         abort(403, description="This Chiklet requires a verified LDAP or Entra username.")
     mode = approval_mode(chiklet)
-    eligible_owners = {server.technical_owner_id, server.business_owner_id} - {None, current_user.id}
-    if mode == "two_stage" and not any((owner := db.session.get(User, uid)) and owner.enabled for uid in eligible_owners):
-        flash("This server needs an enabled technical or business owner other than the requester before a request can be submitted.", "danger")
+    eligible_owners = ({server.business_owner_id} if mode == "business" else
+                       {server.technical_owner_id, server.business_owner_id}) - {None, current_user.id}
+    if mode != "none" and not any((owner := db.session.get(User, uid)) and owner.enabled for uid in eligible_owners):
+        flash(("This server needs an enabled business owner other than the requester." if mode == "business" else
+               "This server needs an enabled technical or business owner other than the requester."), "danger")
         return redirect(url_for("catalog.detail", chiklet_id=chiklet_id))
 
     form_data, errors = validate_form(chiklet, request.form, bound_values=bound_values)
@@ -90,7 +92,7 @@ def submit(chiklet_id):
         chiklet_name=chiklet["name"],
         chiklet_version=chiklet["version"],
         server_group_id=server.group_id,
-        status=RequestStatus.PENDING_APPROVAL.value if mode == "two_stage" else RequestStatus.APPROVED.value,
+        status=RequestStatus.PENDING_APPROVAL.value if mode != "none" else RequestStatus.APPROVED.value,
         approved_at=utcnow() if mode == "none" else None,
         justification=request.form.get("justification", "").strip() or None,
         form_data=form_data,
@@ -124,7 +126,7 @@ def submit(chiklet_id):
     if mode == "none":
         from ..jobs.tasks import execute_request
         execute_request.delay(item.id)
-    flash(f"{item.request_number} submitted {'for owner approval' if mode == 'two_stage' else 'for execution'}.", "success")
+    flash(f"{item.request_number} submitted {'for business owner approval' if mode == 'business' else 'for owner approval' if mode == 'full' else 'for execution'}.", "success")
     return redirect(url_for("requests.detail", request_id=item.id))
 
 

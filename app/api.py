@@ -40,7 +40,7 @@ def request_status(request_id):
         "request_id": item.id,
         "request_number": item.request_number,
         "status": item.status,
-        "owner_approved": any(a.stage == "owner" and a.decision == "approved" for a in item.approvals),
+        "owner_approved": any(a.stage in {"owner", "business"} and a.decision == "approved" for a in item.approvals),
         "foreman_job_id": e.foreman_job_id if e else None,
         "status_label": e.status_label if e else None,
         "last_polled_at": e.last_polled_at.isoformat() if e and e.last_polled_at else None,

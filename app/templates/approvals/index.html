@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="page-heading"><div><div class="eyebrow">CONTROL POINT</div><h1>Pending approvals</h1>
-  <p>Server owner approval comes first; a Linux administrator then reviews variables and authorizes execution.</p>
+  <p>Review requests assigned to you. Full approval uses a server owner and then a Linux administrator; business approval queues after the business owner's decision.</p>
 </div></div>
 <div class="approval-list">
   {% for r in requests %}
   <article class="card approval-card">
     <div>
-      <div class="eyebrow">{{ 'SERVER OWNER REVIEW' if r.status == 'pending_approval' else 'LINUX ADMIN REVIEW' }} · {{ r.request_number }}</div>
+      <div class="eyebrow">{{ 'BUSINESS OWNER REVIEW' if r.status == 'pending_approval' and r.config_snapshot.get('approval', {}).get('mode') == 'business' else 'SERVER OWNER REVIEW' if r.status == 'pending_approval' else 'LINUX ADMIN REVIEW' }} · {{ r.request_number }}</div>
       <h3>{{ r.chiklet_name }}</h3>
       <p><strong>{{ r.target_snapshot.name }}</strong> · {{ r.server_group.name }}</p>
       <p class="muted">Requested by {{ r.requested_by.display_name or r.requested_by.username }} · {{ r.submitted_at.strftime('%Y-%m-%d %H:%M') }}</p>

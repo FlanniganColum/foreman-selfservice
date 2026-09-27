@@ -31,7 +31,7 @@ def sensitive_fields(chiklet):
 
 
 def approval_mode(chiklet):
-    return chiklet.get("approval", {}).get("mode", "two_stage")
+    return chiklet.get("approval", {}).get("mode", "full")
 
 
 def bound_username(chiklet):
@@ -96,9 +96,9 @@ def _validate_definition(data, source=""):
     if not isinstance(properties, dict):
         raise ChikletError(f"{source}: form_schema.properties must be an object")
 
-    approval = data.get("approval", {"mode": "two_stage"})
-    if not isinstance(approval, dict) or set(approval) != {"mode"} or approval["mode"] not in {"two_stage", "none"}:
-        raise ChikletError(f"{source}: approval.mode must be 'two_stage' or 'none'")
+    approval = data.get("approval", {"mode": "full"})
+    if not isinstance(approval, dict) or set(approval) != {"mode"} or approval["mode"] not in {"none", "business", "full"}:
+        raise ChikletError(f"{source}: approval.mode must be 'none', 'business', or 'full'")
     binding = data.get("identity_binding")
     if binding is not None:
         if (not isinstance(binding, dict) or set(binding) != {"username_field", "providers"}

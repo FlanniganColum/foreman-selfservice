@@ -8,6 +8,7 @@
   const statusIntervalMs=4000;
   const outputIntervalMs=8000;
   let currentStatus=panel.dataset.currentStatus||"";
+  const businessOnly=panel.dataset.approvalMode==="business";
   let ownerApproved=Boolean(document.querySelector('[data-step="owner"].done'));
   let hasForemanJob=panel.dataset.hasForemanJob==="true";
   let statusTimer=null;
@@ -30,7 +31,7 @@
   const fullscreenButton=document.getElementById("toggle-execution-fullscreen");
 
   function textStatus(value){
-    if(value==="pending_approval")return "Pending owner approval";
+    if(value==="pending_approval")return businessOnly?"Pending business approval":"Pending owner approval";
     return (value||"").replaceAll("_"," ");
   }
 

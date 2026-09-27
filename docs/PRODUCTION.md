@@ -16,7 +16,7 @@ development and integration testing.
 - Alert on readiness failures, stuck requests, worker absence, repeated auth failures and Foreman API errors.
 - Verify unauthorized users cannot enumerate or submit to protected servers.
 - Assign a technical and/or business owner to each server, and grant final reviewers the Linux admin role.
-- For Chiklets configured for two-stage approval, verify an owner cannot approve their own request and the Linux reviewer differs from the owner approver. Review each approval-free Chiklet's JSON and Foreman job template before enabling it.
+- For Chiklets configured for full approval, verify an owner cannot approve their own request and the Linux reviewer differs from the owner approver. For business approval, verify only the assigned business owner can approve and cannot override variables. Review each approval-free Chiklet's JSON and Foreman job template before enabling it.
 - Verify administrator overrides stay within the saved Chiklet schema and sensitive overrides remain Vault references in logs, audits, request history and Foreman inputs.
 - Test success/failure/cancellation status reconciliation against your Foreman version.
 - Back up and restore PostgreSQL; test rollback procedures.

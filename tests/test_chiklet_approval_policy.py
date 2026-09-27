@@ -84,10 +84,80 @@ def test_invalid_approval_and_unmapped_binding_are_rejected(app):
     data["approval"]["mode"] = "bypass"
     with pytest.raises(ChikletError):
         _validate_definition(data)
+    data["approval"]["mode"] = "one_stage"
+    with pytest.raises(ChikletError):
+        _validate_definition(data)
     data["approval"]["mode"] = "none"
     data["foreman"]["input_map"].pop("account_username")
     with pytest.raises(ChikletError):
         _validate_definition(data)
+
+
+def test_business_only_queues_after_assigned_business_owner_approval(app, client, monkeypatch):
+    configure(app, approval="business")
+    delay = Mock()
+    monkeypatch.setattr("app.jobs.tasks.execute_request.delay", delay)
+    with app.app_context():
+        from app.auth.services import set_local_password
+        business = User(username="business", display_name="Business Owner", role="user")
+        set_local_password(business, "correct horse battery staple")
+        db.session.add(business)
+        db.session.flush()
+        server = db.session.scalar(db.select(Server).where(Server.name == "demo01"))
+        server.business_owner_id = business.id
+        db.session.commit()
+        server_id = server.id
+    login(client, "alice")
+    result = client.post("/requests/submit/deploy-web-application", data={
+        "server_id": server_id, "field__application": "payments-api", "field__version": "1.2.3"})
+    assert result.status_code == 302
+    with app.app_context():
+        item = db.session.scalar(db.select(DeploymentRequest))
+        request_id = item.id
+        assert item.status == "pending_approval" and item.execution is None
+    delay.assert_not_called()
+    assert client.post(f"/approvals/{request_id}/approve").status_code == 403
+    login(client, "approver")  # Assigned technical owner cannot act for the business owner.
+    assert client.post(f"/approvals/{request_id}/approve").status_code == 403
+    login(client, "linuxadmin")
+    assert client.post(f"/approvals/{request_id}/approve").status_code == 403
+    login(client, "business")
+    assert b"Approve &amp; queue Foreman job" in client.get(f"/approvals/{request_id}/review").data
+    assert client.post(f"/approvals/{request_id}/approve", data={
+        "override_fields": ["version"], "field__version": "2.0.0"}).status_code == 400
+    assert client.post(f"/approvals/{request_id}/approve").status_code == 302
+    with app.app_context():
+        item = db.session.get(DeploymentRequest, request_id)
+        assert item.status == "approved" and item.execution.status == "queued"
+        assert [(a.stage, a.decision) for a in item.approvals] == [("business", "approved")]
+        assert item.form_data["version"] == "1.2.3"
+    delay.assert_called_once_with(request_id)
+
+
+def test_business_only_rejection_and_missing_owner_never_queue(app, client, monkeypatch):
+    configure(app, approval="business")
+    delay = Mock()
+    monkeypatch.setattr("app.jobs.tasks.execute_request.delay", delay)
+    with app.app_context():
+        server_id = db.session.scalar(db.select(Server).where(Server.name == "demo01")).id
+    login(client, "alice")
+    payload = {"server_id": server_id, "field__application": "payments-api", "field__version": "1.2.3"}
+    assert client.post("/requests/submit/deploy-web-application", data=payload).status_code == 302
+    with app.app_context():
+        assert db.session.scalar(db.select(DeploymentRequest)) is None
+        server = db.session.get(Server, server_id)
+        server.business_owner_id = db.session.scalar(db.select(User).where(User.username == "approver")).id
+        db.session.commit()
+    assert client.post("/requests/submit/deploy-web-application", data=payload).status_code == 302
+    with app.app_context():
+        request_id = db.session.scalar(db.select(DeploymentRequest)).id
+    login(client, "approver")
+    assert client.post(f"/approvals/{request_id}/reject", data={"comment": "Declined"}).status_code == 302
+    with app.app_context():
+        item = db.session.get(DeploymentRequest, request_id)
+        assert item.status == "rejected" and item.execution is None
+        assert item.approvals[0].stage == "business"
+    delay.assert_not_called()
 
 
 def test_entra_claim_is_preserved_and_refreshed_on_signin(app, client, monkeypatch):

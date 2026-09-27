@@ -6,7 +6,7 @@ from flask_login import current_user, login_required
 from jsonschema import Draft202012Validator
 
 from ..audit.service import audit
-from ..catalog.service import build_form_layout, field_value_from_request, sensitive_fields
+from ..catalog.service import approval_mode, build_form_layout, field_value_from_request, sensitive_fields
 from ..extensions import db
 from ..models import Approval, DeploymentRequest, JobExecution, RequestStatus, Server, utcnow
 from ..secrets import SecretStoreError, store_secrets
@@ -16,6 +16,11 @@ bp = Blueprint("approvals", __name__, url_prefix="/approvals")
 
 def owner_ids(item):
     target = item.target_snapshot or {}
+    if approval_mode(item.config_snapshot) == "business":
+        if "business_owner_id" in target:
+            return {target["business_owner_id"]} - {None}
+        server = db.session.get(Server, target.get("server_id")) if target.get("server_id") else None
+        return {server.business_owner_id} - {None} if server else set()
     if "technical_owner_id" in target or "business_owner_id" in target:
         return {target.get("technical_owner_id"), target.get("business_owner_id")} - {None}
     # Requests created before the owner fields were introduced.
@@ -26,7 +31,7 @@ def owner_ids(item):
 def can_review(item, stage):
     if item.requested_by_id == current_user.id or not current_user.enabled:
         return False
-    if stage == "owner":
+    if stage in {"owner", "business"}:
         return current_user.id in owner_ids(item)
     if stage == "linux":
         return (current_user.role in {"linux_admin", "global_admin"}
@@ -37,7 +42,7 @@ def can_review(item, stage):
 
 def current_stage(item):
     if item.status == RequestStatus.PENDING_APPROVAL.value:
-        return "owner"
+        return "business" if approval_mode(item.config_snapshot) == "business" else "owner"
     if item.status == RequestStatus.PENDING_LINUX_APPROVAL.value:
         return "linux"
     return None
@@ -95,6 +100,14 @@ def approve(request_id):
         item.status = RequestStatus.PENDING_LINUX_APPROVAL.value
         event = "REQUEST_OWNER_APPROVED"
         message = f"{item.request_number} approved by the server owner; awaiting Linux review."
+    elif stage == "business":
+        if any(key.startswith("field__") or key == "override_fields" for key in request.form):
+            abort(400)
+        item.status = RequestStatus.APPROVED.value
+        item.approved_at = utcnow()
+        db.session.add(JobExecution(request=item, status=RequestStatus.QUEUED.value))
+        event = "REQUEST_BUSINESS_APPROVED"
+        message = f"{item.request_number} approved by the business owner and queued."
     else:
         overrides, errors = _read_overrides(item)
         if errors:
@@ -121,7 +134,7 @@ def approve(request_id):
     audit(event, entity_type="deployment_request", entity_id=item.id,
           details={"request_number": item.request_number, "overridden_fields": sorted(overrides) if stage == "linux" else []})
     db.session.commit()
-    if stage == "linux":
+    if stage in {"linux", "business"}:
         from ..jobs.tasks import execute_request
         execute_request.delay(item.id)
     flash(message, "success")

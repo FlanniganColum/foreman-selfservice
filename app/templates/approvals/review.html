@@ -2,18 +2,18 @@
 {% block content %}
 <a class="back" href="{{ url_for('approvals.index') }}">← Approval queue</a>
 <div class="page-heading"><div><div class="eyebrow">{{ item.request_number }}</div>
-  <h1>{{ 'Server owner approval' if stage == 'owner' else 'Linux administrator approval' }}</h1>
+  <h1>{{ 'Business owner approval' if stage == 'business' else 'Server owner approval' if stage == 'owner' else 'Linux administrator approval' }}</h1>
   <p>{{ item.chiklet_name }} for <strong>{{ item.target_snapshot.name }}</strong></p></div></div>
 <section class="card">
   <p>Requested by {{ item.requested_by.display_name or item.requested_by.username }}.
     <a href="{{ url_for('requests.detail', request_id=item.id) }}">View request and approval trail</a>.</p>
   {% if item.justification %}<p><strong>Justification:</strong> {{ item.justification }}</p>{% endif %}
-  {% if stage == 'owner' %}
+  {% if stage in ['owner', 'business'] %}
     <h2>Submitted variables</h2>
     <div class="params">{% for key, value in (item.submitted_form_data or item.form_data).items() %}
       <div><span>{{ key|replace('_', ' ') }}</span><code>{{ '[Stored securely]' if (item.config_snapshot.form_schema.properties.get(key) or {}).get('x-sensitive') else value }}</code></div>
     {% endfor %}</div>
-    <p class="muted">Your approval sends this request to Linux administrators. It does not start a Foreman job.</p>
+    <p class="muted">{{ 'Your approval queues the Foreman job.' if stage == 'business' else 'Your approval sends this request to Linux administrators. It does not start a Foreman job.' }}</p>
   {% else %}
     <h2>Review and override variables</h2>
     <p>Check a field to replace its value. Unchecked fields keep the submitted value. Sensitive fields are blank and will be stored in Vault if changed.</p>
@@ -64,7 +64,7 @@
 <form class="card stack" method="post" action="{{ url_for('approvals.approve', request_id=item.id) }}">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <label>Approval comment<input name="comment" maxlength="2000" placeholder="Do not include passwords or private keys"></label>
-  <button class="button success">Approve for Linux review</button>
+  <button class="button success">{{ 'Approve & queue Foreman job' if stage == 'business' else 'Approve for Linux review' }}</button>
 </form>
 {% endif %}
 <form class="card stack" method="post" action="{{ url_for('approvals.reject', request_id=item.id) }}">

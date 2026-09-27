@@ -13,7 +13,7 @@ Chiklet JSON files are the source of truth for the Self-Service application form
   "category": "Database",
   "icon": {"type": "image", "src": "mssql.svg", "alt": "Microsoft SQL Server"},
   "allowed_server_groups": ["*"],
-  "approval": {"mode": "two_stage"},
+  "approval": {"mode": "full"},
   "form_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -102,7 +102,15 @@ Chiklet JSON files are the source of truth for the Self-Service application form
 
 ## Approval and verified username
 
-Set `"approval": {"mode": "two_stage"}` to require the server's technical or business owner and then a Linux administrator. This is the default if `approval` is omitted. Set `"approval": {"mode": "none"}` for a trusted Chiklet that should queue its Foreman job immediately after submission. The policy is defined in the JSON and is not editable in the request form. Restrict write access to Chiklet files because `none` grants direct execution to entitled users.
+Set `approval.mode` per Chiklet. The policy is defined in JSON and cannot be changed in the request form:
+
+| JSON | Decision and execution |
+| --- | --- |
+| `"approval": {"mode": "none"}` | No approval; queue the Foreman job when submitted. |
+| `"approval": {"mode": "business"}` | The target server's assigned business owner approves; queue the job. No Linux review or variable override. |
+| `"approval": {"mode": "full"}` | The server's technical or business owner approves, then a different Linux administrator (or global administrator) can override editable variables and approve; queue the job. |
+
+Omitting `approval` defaults to `full`. The requester cannot approve their own request. `business` requires an enabled business owner other than the requester; `full` requires an enabled technical or business owner other than the requester. Restrict write access to Chiklet JSON files, particularly those configured with `none`.
 
 For a self-service password reset, bind the target account to the username verified during LDAP or Entra sign-in:
 
@@ -175,7 +183,7 @@ The left side is the Foreman job-template input name. The right side is the Chik
 
 Every `input_map` source must exist in `form_schema.properties`. Invalid Chiklet definitions are rejected when loaded rather than allowing an unmapped or hidden value to reach Foreman.
 
-Linux administrators can override editable fields at the second approval stage. The portal validates every override against the Chiklet schema and does not permit overriding `readOnly` fields or the target server. Original values remain in `submitted_form_data` for review. A sensitive override gets a new Vault KV v2 path; approval and audit records retain only the changed field names. Foreman receives the final values only after the server owner and Linux administrator have each approved.
+With `full` approval, Linux administrators can override editable fields at the second approval stage. The portal validates every override against the Chiklet schema and does not permit overriding `readOnly` fields or the target server. Original values remain in `submitted_form_data` for review. A sensitive override gets a new Vault KV v2 path; approval and audit records retain only the changed field names. Foreman receives the final values after both approval stages. The `business` and `none` modes do not offer overrides.
 
 ## Security
 
