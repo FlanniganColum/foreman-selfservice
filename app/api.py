@@ -3,6 +3,7 @@ from flask_login import login_required, current_user
 from .extensions import db
 from .models import DeploymentRequest
 from .foreman.client import ForemanClient
+from .approvals.routes import owner_ids
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -12,7 +13,9 @@ def _authorise(item):
         return
     if current_user.role in {"global_admin", "admin", "auditor"}:
         return
-    if current_user.role == "approver" and current_user.can_approve_group(item.server_group_id):
+    if current_user.role == "linux_admin":
+        return
+    if current_user.id in owner_ids(item):
         return
     abort(403)
 
@@ -37,6 +40,7 @@ def request_status(request_id):
         "request_id": item.id,
         "request_number": item.request_number,
         "status": item.status,
+        "owner_approved": any(a.stage == "owner" and a.decision == "approved" for a in item.approvals),
         "foreman_job_id": e.foreman_job_id if e else None,
         "status_label": e.status_label if e else None,
         "last_polled_at": e.last_polled_at.isoformat() if e and e.last_polled_at else None,

@@ -31,7 +31,7 @@ def update_user_access(user_id):
     admin_required(True); user=db.session.get(User,user_id)
     if not user: abort(404)
     role=request.form.get("role","user")
-    if role not in {"user","approver","admin","auditor","global_admin"}: abort(400)
+    if role not in {"user","approver","linux_admin","admin","auditor","global_admin"}: abort(400)
     user.role=role; gids={int(x) for x in request.form.getlist("server_group_ids")}; agids={int(x) for x in request.form.getlist("approval_group_ids")}
     user.server_groups=list(db.session.scalars(db.select(ServerGroup).where(ServerGroup.id.in_(gids or {-1}))).all()); user.approval_groups=list(db.session.scalars(db.select(ServerGroup).where(ServerGroup.id.in_(agids or {-1}))).all())
     audit("USER_ACCESS_CHANGED",entity_type="user",entity_id=user.id,details={"role":role,"server_groups":sorted(gids),"approval_groups":sorted(agids)}); db.session.commit(); flash("Access updated.","success"); return redirect(url_for("admin.index"))
@@ -42,6 +42,34 @@ def assign_server_group(server_id):
     admin_required(); server=db.session.get(Server,server_id); group=db.session.get(ServerGroup,int(request.form["group_id"]))
     if not server or not group: abort(404)
     server.group=group; audit("SERVER_GROUP_ASSIGNMENT_CHANGED",entity_type="server",entity_id=server.id,details={"server":server.name,"group":group.slug}); db.session.commit(); flash("Server assignment updated.","success"); return redirect(url_for("admin.index"))
+
+@bp.post("/servers/<int:server_id>/owners")
+@login_required
+def assign_server_owners(server_id):
+    admin_required()
+    server = db.session.get(Server, server_id)
+    if not server:
+        abort(404)
+    owners = {}
+    for kind in ("technical", "business"):
+        raw = request.form.get(f"{kind}_owner_id", "").strip()
+        if raw:
+            try:
+                owner = db.session.get(User, int(raw))
+            except ValueError:
+                abort(400)
+            if not owner or not owner.enabled:
+                abort(400)
+            owners[kind] = owner.id
+        else:
+            owners[kind] = None
+    server.technical_owner_id = owners["technical"]
+    server.business_owner_id = owners["business"]
+    audit("SERVER_OWNERS_CHANGED", entity_type="server", entity_id=server.id,
+          details={"technical_owner_id": owners["technical"], "business_owner_id": owners["business"]})
+    db.session.commit()
+    flash("Server owners updated.", "success")
+    return redirect(url_for("admin.index"))
 
 @bp.post("/local-users")
 @login_required

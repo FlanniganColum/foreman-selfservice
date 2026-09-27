@@ -7,6 +7,7 @@ from .service import (
     can_user_access_chiklet,
     build_form_layout,
     authorised_servers,
+    bound_username,
 )
 
 bp = Blueprint("catalog", __name__)
@@ -24,11 +25,14 @@ def detail(chiklet_id):
     chiklet = get_chiklet(chiklet_id)
     if not chiklet or not can_user_access_chiklet(current_user, chiklet):
         abort(404)
+    bound_values = bound_username(chiklet)
+    if bound_values is None:
+        abort(403, description="This Chiklet requires a verified LDAP or Entra username.")
     return render_template(
         "catalog/detail.html",
         chiklet=chiklet,
         servers=authorised_servers(current_user, chiklet),
-        form_layout=build_form_layout(chiklet),
+        form_layout=build_form_layout(chiklet, bound_values=bound_values),
     )
 
 

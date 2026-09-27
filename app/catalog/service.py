@@ -30,6 +30,19 @@ def sensitive_fields(chiklet):
             if spec.get("x-sensitive") is True}
 
 
+def approval_mode(chiklet):
+    return chiklet.get("approval", {}).get("mode", "two_stage")
+
+
+def bound_username(chiklet):
+    binding = chiklet.get("identity_binding")
+    if not binding:
+        return {}
+    from ..auth.services import authenticated_username
+    username = authenticated_username(binding["providers"])
+    return {binding["username_field"]: username} if username else None
+
+
 @lru_cache(maxsize=256)
 def _load_file_cached(path, mtime_ns):
     with open(path, "r", encoding="utf-8") as f:
@@ -83,6 +96,21 @@ def _validate_definition(data, source=""):
     if not isinstance(properties, dict):
         raise ChikletError(f"{source}: form_schema.properties must be an object")
 
+    approval = data.get("approval", {"mode": "two_stage"})
+    if not isinstance(approval, dict) or set(approval) != {"mode"} or approval["mode"] not in {"two_stage", "none"}:
+        raise ChikletError(f"{source}: approval.mode must be 'two_stage' or 'none'")
+    binding = data.get("identity_binding")
+    if binding is not None:
+        if (not isinstance(binding, dict) or set(binding) != {"username_field", "providers"}
+                or not isinstance(binding.get("username_field"), str)
+                or not isinstance(binding.get("providers"), list)
+                or not binding["providers"] or not all(p in ("ldap", "entra") for p in binding["providers"])):
+            raise ChikletError(f"{source}: identity_binding needs username_field and providers (ldap/entra)")
+        field = binding["username_field"]
+        spec = properties.get(field)
+        if not isinstance(spec, dict) or spec.get("type") != "string" or spec.get("x-sensitive") or "default" in spec:
+            raise ChikletError(f"{source}: identity-bound username field must be a string without a default or sensitive flag")
+
     for field_name, spec in properties.items():
         if spec.get("format") in {"password", "secret"} and spec.get("x-sensitive") is not True:
             raise ChikletError(f"{source}: {field_name!r} must set x-sensitive: true")
@@ -127,6 +155,8 @@ def _validate_definition(data, source=""):
             f"{source}: foreman.input_map references fields not present in form_schema.properties: "
             f"{', '.join(unknown_sources)}"
         )
+    if binding and binding["username_field"] not in input_map.values():
+        raise ChikletError(f"{source}: identity-bound username field must be mapped to Foreman")
     unmapped_secrets = sensitive_fields(data) - set(input_map.values())
     if unmapped_secrets:
         raise ChikletError(f"{source}: sensitive fields must be mapped to Foreman: {', '.join(sorted(unmapped_secrets))}")
@@ -203,7 +233,7 @@ def _enum_options(spec):
     return [{"value": value, "label": labels.get(str(value), str(value))} for value in values]
 
 
-def build_form_layout(chiklet, values=None):
+def build_form_layout(chiklet, values=None, *, bound_values=None):
     """Convert a Chiklet JSON Schema into presentation metadata for the GUI.
 
     JSON Schema remains authoritative for validation; x-ui only controls presentation.
@@ -217,7 +247,8 @@ def build_form_layout(chiklet, values=None):
     for index, (name, spec) in enumerate(schema.get("properties", {}).items()):
         ui = spec.get("x-ui") or {}
         group_name = ui.get("group") or "Configuration"
-        current = None if spec.get("x-sensitive") is True else (values[name] if name in values else spec.get("default"))
+        current = (bound_values[name] if bound_values and name in bound_values else
+                   None if spec.get("x-sensitive") is True else (values[name] if name in values else spec.get("default")))
         field = {
             "name": name,
             "spec": spec,
@@ -226,7 +257,7 @@ def build_form_layout(chiklet, values=None):
             "help": ui.get("help"),
             "placeholder": ui.get("placeholder", spec.get("placeholder", "")),
             "required": name in required,
-            "readonly": spec.get("readOnly") is True,
+            "readonly": spec.get("readOnly") is True or (bound_values is not None and name in bound_values),
             "widget": _infer_widget(spec),
             "options": _enum_options(spec),
             "value": current,
@@ -262,13 +293,13 @@ def field_value_from_request(prop, spec, form):
     return raw
 
 
-def validate_form(chiklet, form):
+def validate_form(chiklet, form, *, bound_values=None):
     schema = chiklet["form_schema"]
     data = {}
     errors = []
     for prop, spec in schema.get("properties", {}).items():
         try:
-            value = field_value_from_request(prop, spec, form)
+            value = bound_values[prop] if bound_values and prop in bound_values else field_value_from_request(prop, spec, form)
             if value not in (None, "", []):
                 data[prop] = value
             elif "default" in spec:
