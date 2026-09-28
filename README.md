@@ -67,7 +67,9 @@ Sign in using the bootstrap local account. In **Administration**, assign users t
 
 ## Local account password changes
 
-Users signed in with a local account can select **Change password** in the navigation. They must enter their current password and a different new password of 14–256 characters, then sign in again. The change affects only their own portal credential, is rate limited and audited, and uses the existing failed-attempt lockout policy. LDAP and Entra passwords are managed by their respective identity providers. This signed-in flow does not provide recovery for someone who has forgotten their password and cannot sign in.
+Users can open **My profile** from the header to see their sign-in method, username, role, server groups, server ownership, recent requests, and account security options. Locally signed-in users can update their own display name and email address there and select **Change password**. Usernames, roles, group membership, and server ownership remain administrator-managed. LDAP and Entra contact details and passwords are managed through their respective identity providers.
+
+Local password changes require the current password and a different new password of 14–256 characters, followed by signing in again. The change affects only the signed-in user's portal credential, is rate limited and audited, and uses the existing failed-attempt lockout policy. This signed-in flow does not provide recovery for someone who has forgotten their password and cannot sign in.
 
 ## Approval policies
 

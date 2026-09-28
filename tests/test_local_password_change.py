@@ -6,7 +6,8 @@ from app.auth.services import ph
 
 def test_local_user_can_change_only_their_own_password(app, client):
     login(client, "alice")
-    assert b"Change password" in client.get("/").data
+    assert b"My profile" in client.get("/").data
+    assert b"Change password" in client.get("/auth/profile").data
     assert client.get("/auth/password").status_code == 200
 
     result = client.post("/auth/password", data={

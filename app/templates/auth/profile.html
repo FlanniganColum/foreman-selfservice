@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}My profile · Foreman Self-Service{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><div class="eyebrow">MY ACCOUNT</div><h1>My profile</h1><p>View your sign-in details, access, and recent requests.</p></div>
+</div>
+
+<div class="profile-layout">
+  <div>
+    <section class="card" aria-labelledby="profile-details-title">
+      <div class="profile-heading"><div class="profile-avatar" aria-hidden="true">{{ (current_user.display_name or current_user.username)[:1]|upper }}</div>
+        <div><h2 id="profile-details-title">{{ current_user.display_name or current_user.username }}</h2>
+          <p class="muted">{{ current_user.username }} · {{ current_user.role|replace('_',' ')|title }}</p></div></div>
+      <dl class="profile-facts">
+        <div><dt>Username</dt><dd>{{ current_user.username }}</dd></div>
+        <div><dt>Sign-in method</dt><dd>{{ 'Local account' if provider == 'local' else 'LDAP directory' if provider == 'ldap' else 'Microsoft Entra' if provider == 'entra' else 'Unknown — sign in again' }}</dd></div>
+        {% if verified_username and verified_username != current_user.username %}
+        <div><dt>Verified directory username</dt><dd>{{ verified_username }}</dd></div>
+        {% endif %}
+        <div><dt>Application role</dt><dd>{{ current_user.role|replace('_',' ')|title }}</dd></div>
+        <div><dt>Last sign-in</dt><dd>{{ current_user.last_login_at.strftime('%Y-%m-%d %H:%M UTC') if current_user.last_login_at else 'Not recorded' }}</dd></div>
+      </dl>
+
+      <h3>Contact details</h3>
+      {% if can_edit %}
+      <p class="muted">These details belong to your local portal account. Your username and access are managed by an administrator.</p>
+      {% if form_errors is defined and form_errors %}
+      <div class="form-error-summary" role="alert" tabindex="-1" data-form-error-summary>
+        <h4>Check your details</h4><ul>
+          {% for field, message in form_errors.items() %}<li><a href="#profile-{{ field }}">{{ message }}</a></li>{% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+      <form class="stack" method="post" action="{{ url_for('auth.update_profile') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label for="profile-display_name">Display name
+          <input id="profile-display_name" name="display_name" value="{{ display_name_value if display_name_value is defined else current_user.display_name or '' }}" maxlength="255" autocomplete="name" required {% if form_errors is defined and form_errors.get('display_name') %}aria-invalid="true" aria-describedby="profile-display_name-error"{% endif %}>
+        </label>
+        {% if form_errors is defined and form_errors.get('display_name') %}<small id="profile-display_name-error" class="field-error">{{ form_errors.display_name }}</small>{% endif %}
+        <label for="profile-email">Email address
+          <input id="profile-email" type="email" name="email" value="{{ email_value if email_value is defined else current_user.email or '' }}" maxlength="255" autocomplete="email" {% if form_errors is defined and form_errors.get('email') %}aria-invalid="true" aria-describedby="profile-email-error"{% endif %}>
+        </label>
+        {% if form_errors is defined and form_errors.get('email') %}<small id="profile-email-error" class="field-error">{{ form_errors.email }}</small>{% endif %}
+        <button class="button primary" type="submit">Save contact details</button>
+      </form>
+      {% else %}
+      <dl class="profile-facts">
+        <div><dt>Display name</dt><dd>{{ current_user.display_name or 'Not provided' }}</dd></div>
+        <div><dt>Email address</dt><dd>{{ current_user.email or 'Not provided' }}</dd></div>
+      </dl>
+      <p class="muted">{{ 'These details come from your identity provider. Update them there.' if provider in ['ldap','entra'] else 'Sign in again to view your account options.' }}</p>
+      {% endif %}
+    </section>
+
+    <section class="card" aria-labelledby="profile-access-title">
+      <h2 id="profile-access-title">Access and responsibilities</h2>
+      <p class="muted">An administrator manages your role and server access.</p>
+      <h3>Server groups you can target</h3>
+      {% if target_groups %}<ul class="profile-tags">{% for group in target_groups %}<li>{{ group.name }}</li>{% endfor %}</ul>
+      {% else %}<p class="muted">No server groups assigned.</p>{% endif %}
+      {% if approval_groups and current_user.role == 'approver' %}
+      <h3>Approver groups</h3><ul class="profile-tags">{% for group in approval_groups %}<li>{{ group.name }}</li>{% endfor %}</ul>
+      {% endif %}
+      {% if owned_servers %}
+      <h3>Servers you own</h3><ul class="profile-list">{% for server in owned_servers %}<li><span>{{ server.name }}</span><span class="muted">{{ 'Technical' if server.technical_owner_id == current_user.id else '' }}{{ ' and ' if server.technical_owner_id == current_user.id and server.business_owner_id == current_user.id else '' }}{{ 'Business' if server.business_owner_id == current_user.id else '' }} owner</span></li>{% endfor %}</ul>
+      {% endif %}
+    </section>
+  </div>
+
+  <div>
+    <section class="card" aria-labelledby="profile-security-title">
+      <h2 id="profile-security-title">Sign-in and security</h2>
+      {% if can_edit %}
+      <p>Your password is stored as a secure hash. The current password is required to change it.</p>
+      <p class="muted">Last changed: {{ current_user.local_credential.password_changed_at.strftime('%Y-%m-%d %H:%M UTC') if current_user.local_credential.password_changed_at else 'Not recorded' }}</p>
+      <a class="button secondary" href="{{ url_for('auth.password_form') }}">Change password</a>
+      {% else %}
+      <p class="muted">{{ 'Change your password through your identity provider.' if provider in ['ldap','entra'] else 'Sign in again to manage your local password.' }}</p>
+      {% endif %}
+    </section>
+    <section class="card" aria-labelledby="profile-activity-title">
+      <div class="profile-section-heading"><h2 id="profile-activity-title">Recent requests</h2><a href="{{ url_for('requests.index') }}">View request history</a></div>
+      {% if recent_requests %}
+      <ul class="profile-list">{% for item in recent_requests %}
+        <li><a href="{{ url_for('requests.detail',request_id=item.id) }}">{{ item.chiklet_name }}<small>{{ item.request_number }}</small></a><span class="status {{ item.status }}">{{ item.status|replace('_',' ') }}</span></li>
+      {% endfor %}</ul>
+      {% else %}<p class="muted">No requests submitted yet.</p><a href="{{ url_for('catalog.index') }}">Browse applications</a>{% endif %}
+    </section>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,27 @@
+.profile-layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(300px,.8fr);gap:20px;align-items:start}
+.profile-heading{display:flex;align-items:center;gap:16px;margin-bottom:20px}
+.profile-heading h2{margin:0;color:var(--navy)}
+.profile-heading p{margin:4px 0 0}
+.profile-avatar{width:58px;height:58px;flex:none;display:grid;place-items:center;border-radius:16px;background:#e1effc;color:var(--navy);font-size:26px;font-weight:700}
+.profile-facts{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin:0 0 24px}
+.profile-facts div{min-width:0}
+.profile-facts dt{font-size:13px;color:#52687b}
+.profile-facts dd{margin:4px 0 0;font-weight:650;overflow-wrap:anywhere}
+.profile-tags{display:flex;flex-wrap:wrap;gap:8px;list-style:none;padding:0;margin:8px 0 20px}
+.profile-tags li{padding:7px 11px;border-radius:999px;background:#eaf2fa;color:#173f66}
+.profile-list{list-style:none;padding:0;margin:0}
+.profile-list li{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:11px 0;border-bottom:1px solid var(--line)}
+.profile-list li:last-child{border-bottom:0}
+.profile-list li>*{min-width:0;overflow-wrap:anywhere}
+.profile-list small{display:block;color:#52687b;margin-top:4px}
+.profile-section-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.profile-section-heading h2{margin-top:0}
+.profile-layout .stack{margin-top:16px}
+.profile-layout .stack>.field-error{margin-top:-14px}
+.profile-layout .button{justify-self:start}
+.profile-layout .form-error-summary h4{margin:0 0 8px;font-size:20px;color:#922b2b}
+.password-card{max-width:520px;margin:0 auto}
+.identity .profile-link{display:inline-flex;align-items:center;min-height:40px;padding:0 7px;white-space:nowrap}
+.identity .profile-link[aria-current="page"]{box-shadow:inset 0 -3px var(--blue);font-weight:700}
+@media(max-width:800px){.profile-layout{grid-template-columns:1fr}.profile-facts{grid-template-columns:1fr 1fr}}
+@media(max-width:520px){.profile-facts{grid-template-columns:1fr}.profile-list li{align-items:flex-start}.profile-layout .card{padding:20px}.topbar .identity{flex-wrap:wrap;justify-content:flex-end}}
