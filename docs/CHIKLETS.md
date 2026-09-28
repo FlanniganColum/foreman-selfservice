@@ -114,7 +114,9 @@ Omitting `approval` defaults to `full`. The requester cannot approve their own r
 
 The three shipped Chiklets explicitly use `full`, since application deployment, Linux patching, and driver installation change server state. To use either other policy, set the mode in the relevant Chiklet JSON after reviewing its Foreman job and access rules.
 
-For a self-service password reset, bind the target account to the username verified during LDAP or Entra sign-in:
+The portal's own **local account** password change is a separate signed-in action under **Change password**; it does not use a Chiklet, Foreman, or this identity binding. The example below concerns passwords on managed target systems.
+
+For a self-service password reset on a target system, bind the target account to the username verified during LDAP or Entra sign-in:
 
 ```json
 "approval": {"mode": "none"},

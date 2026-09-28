@@ -65,6 +65,10 @@ Browse to `https://localhost`. Nginx creates a self-signed development certifica
 
 Sign in using the bootstrap local account. In **Administration**, assign users to **Demo Servers**, assign each server a technical and/or business owner, and give Linux reviewers the **Linux admin** role. Sample Chiklets then appear for entitled users. Chiklets requiring approval need an eligible server owner other than the requester.
 
+## Local account password changes
+
+Users signed in with a local account can select **Change password** in the navigation. They must enter their current password and a different new password of 14–256 characters, then sign in again. The change affects only their own portal credential, is rate limited and audited, and uses the existing failed-attempt lockout policy. LDAP and Entra passwords are managed by their respective identity providers. This signed-in flow does not provide recovery for someone who has forgotten their password and cannot sign in.
+
 ## Approval policies
 
 1. A technical or business owner assigned to the target server approves the original request. Either owner may give the one required owner approval. No job starts at this stage.

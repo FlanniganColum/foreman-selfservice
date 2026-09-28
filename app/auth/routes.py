@@ -1,9 +1,9 @@
 from flask import Blueprint,current_app,flash,redirect,render_template,request,url_for,session
-from flask_login import current_user,login_user,logout_user
+from flask_login import current_user,login_required,login_user,logout_user
 from ..extensions import db,limiter
 from ..audit.service import audit
 from ..models import utcnow
-from .services import verify_local,authenticate_ldap,begin_entra_flow,complete_entra_flow
+from .services import verify_local,set_local_password,authenticate_ldap,begin_entra_flow,complete_entra_flow
 bp=Blueprint("auth",__name__,url_prefix="/auth")
 
 @bp.get("/login")
@@ -19,6 +19,7 @@ def local_login():
     if not user:
         audit("LOGIN_FAILED",details={"provider":"local","username":request.form.get("username","")}); db.session.commit(); flash(error or "Sign-in failed","danger"); return redirect(url_for("auth.login"))
     session.pop("authenticated_identity_id",None)
+    session["auth_provider"]="local"
     login_user(user); user.last_login_at=utcnow(); audit("LOGIN_SUCCEEDED",details={"provider":"local"}); db.session.commit()
     return redirect(url_for("catalog.index"))
 
@@ -29,6 +30,7 @@ def ldap_login():
     user,error=authenticate_ldap(request.form.get("username","").strip(),request.form.get("password",""))
     if not user:
         audit("LOGIN_FAILED",details={"provider":"ldap","username":request.form.get("username","")}); db.session.commit(); flash(error or "Sign-in failed","danger"); return redirect(url_for("auth.login"))
+    session["auth_provider"]="ldap"
     login_user(user); audit("LOGIN_SUCCEEDED",details={"provider":"ldap"}); db.session.commit()
     return redirect(url_for("catalog.index"))
 
@@ -41,10 +43,46 @@ def entra_login():
 def entra_callback():
     user,error=complete_entra_flow(request.args.to_dict(flat=True))
     if not user: flash(error or "Microsoft Entra sign-in failed","danger"); return redirect(url_for("auth.login"))
+    session["auth_provider"]="entra"
     login_user(user); audit("LOGIN_SUCCEEDED",details={"provider":"entra"}); db.session.commit(); return redirect(url_for("catalog.index"))
+
+def _local_password_change_allowed():
+    return (current_app.config["ENABLE_LOCAL"] and session.get("auth_provider")=="local"
+            and current_user.enabled and current_user.local_credential is not None)
+
+@bp.get("/password")
+@login_required
+def password_form():
+    if not _local_password_change_allowed(): return ("Local sign-in required",403)
+    return render_template("auth/password.html")
+
+@bp.post("/password")
+@login_required
+@limiter.limit("5 per minute")
+def change_password():
+    if not _local_password_change_allowed(): return ("Local sign-in required",403)
+    current=request.form.get("current_password","")
+    new=request.form.get("new_password","")
+    confirmation=request.form.get("confirm_password","")
+    if not current or not 14<=len(new)<=256 or new!=confirmation or new==current:
+        flash("Enter your current password and a different new password of 14 to 256 characters, then confirm it.","danger")
+        return redirect(url_for("auth.password_form"))
+    user,error=verify_local(current_user.username,current)
+    if not user:
+        audit("LOCAL_PASSWORD_CHANGE_FAILED",entity_type="user",entity_id=current_user.id,
+              details={"reason":"current_password_rejected"})
+        db.session.commit()  # Persist failed attempts and the existing lockout policy.
+        flash("Current password is incorrect or the account is temporarily locked.","danger")
+        return redirect(url_for("auth.password_form"))
+    set_local_password(current_user,new)
+    audit("LOCAL_PASSWORD_CHANGED",entity_type="user",entity_id=current_user.id)
+    db.session.commit()
+    logout_user()
+    session.clear()
+    flash("Password changed. Sign in again with your new password.","success")
+    return redirect(url_for("auth.login"))
 
 @bp.post("/logout")
 def logout():
     if current_user.is_authenticated: audit("LOGOUT"); db.session.commit()
-    session.pop("authenticated_identity_id",None)
-    logout_user(); return redirect(url_for("auth.login"))
+    logout_user(); session.clear(); return redirect(url_for("auth.login"))
