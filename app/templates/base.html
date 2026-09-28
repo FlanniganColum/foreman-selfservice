@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="{{ url_for('static',filename='css/app.css') }}">
   <link rel="stylesheet" href="{{ url_for('static',filename='css/approvals.css') }}">
   <link rel="stylesheet" href="{{ url_for('static',filename='css/ux.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static',filename='css/profile.css') }}">
   <script defer src="{{ url_for('static',filename='js/app.js') }}"></script>
 </head>
 <body>
@@ -27,11 +28,9 @@
     {% if current_user.role in ['admin','global_admin'] %}
     <a href="{{ url_for('admin.index') }}" {% if request.blueprint == 'admin' %}aria-current="page"{% endif %}>Administration</a>
     {% endif %}
-    {% if config.ENABLE_LOCAL and session.get('auth_provider') == 'local' and current_user.local_credential %}
-    <a href="{{ url_for('auth.password_form') }}" {% if request.endpoint == 'auth.password_form' %}aria-current="page"{% endif %}>Change password</a>
-    {% endif %}
   </nav>
   <div class="identity">
+    <a class="profile-link" href="{{ url_for('auth.profile') }}" {% if request.endpoint in ['auth.profile','auth.password_form'] %}aria-current="page"{% endif %}>My profile</a>
     <span>{{ current_user.display_name or current_user.username }}</span>
     <span class="pill">{{ current_user.role|replace('_',' ') }}</span>
     <form method="post" action="{{ url_for('auth.logout') }}">
