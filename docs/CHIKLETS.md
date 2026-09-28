@@ -112,6 +112,8 @@ Set `approval.mode` per Chiklet. The policy is defined in JSON and cannot be cha
 
 Omitting `approval` defaults to `full`. The requester cannot approve their own request. `business` requires an enabled business owner other than the requester; `full` requires an enabled technical or business owner other than the requester. Restrict write access to Chiklet JSON files, particularly those configured with `none`.
 
+The three shipped Chiklets explicitly use `full`, since application deployment, Linux patching, and driver installation change server state. To use either other policy, set the mode in the relevant Chiklet JSON after reviewing its Foreman job and access rules.
+
 For a self-service password reset, bind the target account to the username verified during LDAP or Entra sign-in:
 
 ```json

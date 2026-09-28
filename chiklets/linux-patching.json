@@ -4,6 +4,7 @@
   "name": "Linux Patching",
   "description": "Run the approved operating-system patching workflow with optional reboot.",
   "category": "Operating System",
+  "approval": {"mode": "full"},
   "icon": "\u2726",
   "allowed_server_groups": [
     "demo",
