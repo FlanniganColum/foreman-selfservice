@@ -1,3 +1,54 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{% block title %}Foreman Self-Service{% endblock %}</title><link rel="icon" type="image/png" href="{{ url_for('static',filename='img/favicon.png') }}"><link rel="stylesheet" href="{{ url_for('static',filename='css/app.css') }}"><link rel="stylesheet" href="{{ url_for('static',filename='css/approvals.css') }}"><script defer src="{{ url_for('static',filename='js/app.js') }}"></script></head>
-<body><header class="topbar"><a class="brand" href="{{ url_for('catalog.index') }}"><img src="{{ url_for('static',filename='img/foreman-selfservice-logo.png') }}" alt="Foreman Self-Service"></a>{% if current_user.is_authenticated %}<nav><a href="{{ url_for('catalog.index') }}">Applications</a><a href="{{ url_for('requests.index') }}">Requests</a>{% if current_user.role in ['linux_admin','global_admin'] or current_user.is_server_owner() %}<a href="{{ url_for('approvals.index') }}">Approvals</a>{% endif %}{% if current_user.role in ['auditor','admin','global_admin'] %}<a href="{{ url_for('audit.index') }}">Audit</a>{% endif %}{% if current_user.role in ['admin','global_admin'] %}<a href="{{ url_for('admin.index') }}">Administration</a>{% endif %}{% if config.ENABLE_LOCAL and session.get('auth_provider') == 'local' and current_user.local_credential %}<a href="{{ url_for('auth.password_form') }}">Change password</a>{% endif %}</nav><div class="identity"><span>{{ current_user.display_name or current_user.username }}</span><span class="pill">{{ current_user.role|replace('_',' ') }}</span><form method="post" action="{{ url_for('auth.logout') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">Sign out</button></form></div>{% endif %}</header>
-<main class="shell">{% with messages=get_flashed_messages(with_categories=true) %}{% for category,message in messages %}<div class="alert {{ category }}">{{ message }}</div>{% endfor %}{% endwith %}{% block content %}{% endblock %}</main><footer>Foreman Self-Service Portal · controlled infrastructure automation</footer></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}Foreman Self-Service{% endblock %}</title>
+  <link rel="icon" type="image/png" href="{{ url_for('static',filename='img/favicon.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static',filename='css/app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static',filename='css/approvals.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static',filename='css/ux.css') }}">
+  <script defer src="{{ url_for('static',filename='js/app.js') }}"></script>
+</head>
+<body>
+<a class="skip-link" href="#main-content">Skip to main content</a>
+<header class="topbar">
+  <a class="brand" href="{{ url_for('catalog.index') }}"><img src="{{ url_for('static',filename='img/foreman-selfservice-logo.png') }}" alt="Foreman Self-Service"></a>
+  {% if current_user.is_authenticated %}
+  <nav aria-label="Primary">
+    <a href="{{ url_for('catalog.index') }}" {% if request.blueprint == 'catalog' %}aria-current="page"{% endif %}>Applications</a>
+    <a href="{{ url_for('requests.index') }}" {% if request.blueprint == 'requests' %}aria-current="page"{% endif %}>Requests</a>
+    {% if current_user.role in ['linux_admin','global_admin'] or current_user.is_server_owner() %}
+    <a href="{{ url_for('approvals.index') }}" {% if request.blueprint == 'approvals' %}aria-current="page"{% endif %}>Approvals</a>
+    {% endif %}
+    {% if current_user.role in ['auditor','admin','global_admin'] %}
+    <a href="{{ url_for('audit.index') }}" {% if request.blueprint == 'audit' %}aria-current="page"{% endif %}>Audit</a>
+    {% endif %}
+    {% if current_user.role in ['admin','global_admin'] %}
+    <a href="{{ url_for('admin.index') }}" {% if request.blueprint == 'admin' %}aria-current="page"{% endif %}>Administration</a>
+    {% endif %}
+    {% if config.ENABLE_LOCAL and session.get('auth_provider') == 'local' and current_user.local_credential %}
+    <a href="{{ url_for('auth.password_form') }}" {% if request.endpoint == 'auth.password_form' %}aria-current="page"{% endif %}>Change password</a>
+    {% endif %}
+  </nav>
+  <div class="identity">
+    <span>{{ current_user.display_name or current_user.username }}</span>
+    <span class="pill">{{ current_user.role|replace('_',' ') }}</span>
+    <form method="post" action="{{ url_for('auth.logout') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="link-button">Sign out</button>
+    </form>
+  </div>
+  {% endif %}
+</header>
+<main class="shell" id="main-content" tabindex="-1">
+  {% with messages=get_flashed_messages(with_categories=true) %}
+    {% for category,message in messages %}
+      <div class="alert {{ category }}" role="{{ 'alert' if category == 'danger' else 'status' }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+<footer>Foreman Self-Service Portal · controlled infrastructure automation</footer>
+</body>
+</html>
