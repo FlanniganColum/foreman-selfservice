@@ -53,16 +53,16 @@ def submit(chiklet_id):
                "This server needs an enabled technical or business owner other than the requester."), "danger")
         return redirect(url_for("catalog.detail", chiklet_id=chiklet_id))
 
-    form_data, errors = validate_form(chiklet, request.form, bound_values=bound_values)
+    form_data, errors, field_errors = validate_form(chiklet, request.form, bound_values=bound_values, with_fields=True)
     if errors:
-        for error in errors:
-            flash(error, "danger")
         return (
             render_template(
                 "catalog/detail.html",
                 chiklet=chiklet,
                 servers=authorised_servers(current_user, chiklet),
                 form_layout=build_form_layout(chiklet, form_data, bound_values=bound_values),
+                errors=errors,
+                field_errors=field_errors,
                 selected_server_id=server.id,
                 justification=request.form.get("justification", ""),
             ),

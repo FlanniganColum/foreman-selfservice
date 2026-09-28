@@ -3,7 +3,8 @@
 {% macro render_field(field) %}
   {% set spec = field.spec %}
   {% set input_name = 'field__' ~ field.name %}
-  <label class="schema-field{% if field.width == 'half' %} schema-field-half{% endif %}">
+  {% set field_error = field_errors.get(field.name) if field_errors is defined else none %}
+  <label class="schema-field{% if field.width == 'half' %} schema-field-half{% endif %}{% if field_error %} has-error{% endif %}">
     <span class="schema-field-title">
       {{ field.title }}{% if field.required %}<b>*</b>{% endif %}
       {% if field.readonly %}<span class="field-badge">Fixed</span>{% endif %}
@@ -29,12 +30,12 @@
 
     {% elif field.widget == 'toggle' %}
       <span class="toggle-row">
-        <input type="checkbox" name="{{ input_name }}" value="true" {% if field.value %}checked{% endif %}>
+        <input id="{{ input_name }}" type="checkbox" name="{{ input_name }}" value="true" {% if field.value %}checked{% endif %} {% if field_error %}aria-invalid="true" aria-describedby="{{ input_name }}-error"{% endif %}>
         Enable
       </span>
 
     {% elif field.widget == 'select' %}
-      <select name="{{ input_name }}" {% if field.required %}required{% endif %}>
+      <select id="{{ input_name }}" name="{{ input_name }}" {% if field.required %}required{% endif %} {% if field_error %}aria-invalid="true" aria-describedby="{{ input_name }}-error"{% endif %}>
         {% if not field.required %}<option value="">Select…</option>{% endif %}
         {% for option in field.options %}
           <option value="{{ option.value }}" {% if field.value == option.value %}selected{% endif %}>{{ option.label }}</option>
@@ -42,7 +43,7 @@
       </select>
 
     {% elif field.widget == 'multiselect' %}
-      <select name="{{ input_name }}" multiple {% if field.required %}required{% endif %}>
+      <select id="{{ input_name }}" name="{{ input_name }}" multiple {% if field.required %}required{% endif %} {% if field_error %}aria-invalid="true" aria-describedby="{{ input_name }}-error"{% endif %}>
         {% for option in field.options %}
           <option value="{{ option.value }}" {% if option.value in (field.value or []) %}selected{% endif %}>{{ option.label }}</option>
         {% endfor %}
@@ -51,7 +52,9 @@
     {% elif field.widget == 'number' %}
       <input
         type="number"
+        id="{{ input_name }}"
         name="{{ input_name }}"
+        {% if field_error %}aria-invalid="true" aria-describedby="{{ input_name }}-error"{% endif %}
         value="{{ field.value if field.value is not none else '' }}"
         {% if spec.type == 'integer' %}step="1"{% else %}step="{{ spec.multipleOf if spec.multipleOf is defined else 'any' }}"{% endif %}
         {% if spec.minimum is defined %}min="{{ spec.minimum }}"{% endif %}
@@ -61,14 +64,16 @@
       >
 
     {% elif field.widget == 'password' %}
-      <input type="password" name="{{ input_name }}" value="" autocomplete="new-password" {% if field.required %}required{% endif %}>
+      <input id="{{ input_name }}" type="password" name="{{ input_name }}" value="" autocomplete="new-password" {% if field.required %}required{% endif %} {% if field_error %}aria-invalid="true" aria-describedby="{{ input_name }}-error"{% endif %}>
 
     {% elif field.widget == 'secret-textarea' %}
-      <textarea name="{{ input_name }}" rows="{{ (spec.get('x-ui') or {}).get('rows', 5) }}" autocomplete="off" spellcheck="false" {% if field.required %}required{% endif %}></textarea>
+      <textarea id="{{ input_name }}" name="{{ input_name }}" rows="{{ (spec.get('x-ui') or {}).get('rows', 5) }}" autocomplete="off" spellcheck="false" {% if field.required %}required{% endif %} {% if field_error %}aria-invalid="true" aria-describedby="{{ input_name }}-error"{% endif %}></textarea>
 
     {% elif field.widget == 'textarea' %}
       <textarea
+        id="{{ input_name }}"
         name="{{ input_name }}"
+        {% if field_error %}aria-invalid="true" aria-describedby="{{ input_name }}-error"{% endif %}
         rows="{{ (spec.get('x-ui') or {}).get('rows', 5) }}"
         {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
         {% if spec.minLength is defined %}minlength="{{ spec.minLength }}"{% endif %}
@@ -77,15 +82,17 @@
       >{{ field.value if field.value is not none else '' }}</textarea>
 
     {% elif field.widget == 'date' %}
-      <input type="date" name="{{ input_name }}" value="{{ field.value if field.value is not none else '' }}" {% if field.required %}required{% endif %}>
+      <input id="{{ input_name }}" type="date" name="{{ input_name }}" value="{{ field.value if field.value is not none else '' }}" {% if field.required %}required{% endif %} {% if field_error %}aria-invalid="true" aria-describedby="{{ input_name }}-error"{% endif %}>
 
     {% elif field.widget == 'datetime-local' %}
-      <input type="datetime-local" name="{{ input_name }}" value="{{ field.value if field.value is not none else '' }}" {% if field.required %}required{% endif %}>
+      <input id="{{ input_name }}" type="datetime-local" name="{{ input_name }}" value="{{ field.value if field.value is not none else '' }}" {% if field.required %}required{% endif %} {% if field_error %}aria-invalid="true" aria-describedby="{{ input_name }}-error"{% endif %}>
 
     {% else %}
       <input
         type="text"
+        id="{{ input_name }}"
         name="{{ input_name }}"
+        {% if field_error %}aria-invalid="true" aria-describedby="{{ input_name }}-error"{% endif %}
         value="{{ field.value if field.value is not none else '' }}"
         {% if field.placeholder %}placeholder="{{ field.placeholder }}"{% endif %}
         {% if spec.minLength is defined %}minlength="{{ spec.minLength }}"{% endif %}
@@ -97,6 +104,7 @@
 
     {% if field.description %}<small>{{ field.description }}</small>{% endif %}
     {% if field.help and field.help != field.description %}<small class="field-help">{{ field.help }}</small>{% endif %}
+    {% if field_error %}<small id="{{ input_name }}-error" class="field-error">{{ field_error }}</small>{% endif %}
   </label>
 {% endmacro %}
 
@@ -107,6 +115,16 @@
     <h1>{{ chiklet.name }}</h1>
     <p class="lede">{{ chiklet.description }}</p>
     <p class="schema-intro">Configure the deployment for your requirement. Values shown are defaults unless marked <strong>Fixed</strong>.</p>
+
+    {% if errors is defined and errors %}
+    <div class="form-error-summary" role="alert" tabindex="-1" data-form-error-summary>
+      <h2>Check the following {{ 'field' if errors|length == 1 else 'fields' }}</h2>
+      <ul>
+      {% for name, message in field_errors.items() %}<li><a href="#field__{{ name }}">{{ message }}</a></li>{% endfor %}
+      {% for error in errors if error not in field_errors.values() %}<li>{{ error }}</li>{% endfor %}
+      </ul>
+    </div>
+    {% endif %}
 
     <form method="post" action="{{ url_for('requests.submit',chiklet_id=chiklet.id) }}" class="stack schema-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

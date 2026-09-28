@@ -8,7 +8,7 @@
     <h1>{{ item.chiklet_name }}</h1>
     <p>Target: <strong>{{ item.target_snapshot.name }}</strong></p>
   </div>
-  <span id="request-status" class="status {{ item.status }}">{{ 'Pending business approval' if item.status == 'pending_approval' and item.config_snapshot.get('approval', {}).get('mode') == 'business' else 'Pending owner approval' if item.status == 'pending_approval' else item.status|replace('_',' ') }}</span>
+  <span id="request-status" class="status {{ item.status }}" role="status" aria-live="polite">{{ 'Pending business approval' if item.status == 'pending_approval' and item.config_snapshot.get('approval', {}).get('mode') == 'business' else 'Pending owner approval' if item.status == 'pending_approval' else item.status|replace('_',' ') }}</span>
 </div>
 
 <div class="detail-layout">

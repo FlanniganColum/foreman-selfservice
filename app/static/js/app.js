@@ -1,4 +1,19 @@
 (function(){
+  const errorSummary=document.querySelector("[data-form-error-summary]");
+  if(errorSummary)errorSummary.focus();
+
+  document.querySelectorAll(".approval-override").forEach(row=>{
+    const checkbox=row.querySelector('input[name="override_fields"]');
+    if(!checkbox)return;
+    const controls=row.querySelectorAll('[name^="field__"]');
+    function sync(){
+      row.classList.toggle("is-selected",checkbox.checked);
+      controls.forEach(control=>{control.disabled=!checkbox.checked;});
+    }
+    checkbox.addEventListener("change",sync);
+    sync();
+  });
+
   const panel=document.querySelector("[data-status-url]");
   if(!panel)return;
 
@@ -66,7 +81,8 @@
     panel.dataset.hasForemanJob=hasForemanJob?"true":"false";
 
     if(statusPill){
-      statusPill.textContent=textStatus(currentStatus);
+      const label=textStatus(currentStatus);
+      if(statusPill.textContent!==label)statusPill.textContent=label;
       statusPill.className="status "+currentStatus;
     }
     if(foremanJob)foremanJob.textContent=d.foreman_job_id||"Waiting to submit";
