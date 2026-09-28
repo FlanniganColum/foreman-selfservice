@@ -1,5 +1,5 @@
 from pathlib import Path
-from flask import Blueprint, abort, current_app, render_template, send_from_directory
+from flask import Blueprint, abort, current_app, render_template, request, send_from_directory
 from flask_login import login_required, current_user
 from .service import (
     list_chiklets,
@@ -15,7 +15,20 @@ bp = Blueprint("catalog", __name__)
 @bp.get("/")
 @login_required
 def index():
-    return render_template("catalog/index.html", chiklets=[x for x in list_chiklets() if can_user_access_chiklet(current_user, x)])
+    available = [x for x in list_chiklets() if can_user_access_chiklet(current_user, x)]
+    categories = sorted({x.get("category") or "Automation" for x in available}, key=str.casefold)
+    query = request.args.get("q", "").strip()[:120]
+    category = request.args.get("category", "").strip()
+    if category not in categories:
+        category = ""
+    terms = query.casefold().split()
+    chiklets = [
+        x for x in available
+        if (not category or (x.get("category") or "Automation") == category)
+        and all(term in " ".join((x["name"], x["description"], x.get("category") or "Automation")).casefold() for term in terms)
+    ]
+    return render_template("catalog/index.html", chiklets=chiklets, categories=categories,
+                           query=query, category=category, available_count=len(available))
 
 
 @bp.get("/chiklets/<chiklet_id>")
