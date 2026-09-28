@@ -4,6 +4,7 @@
   "name": "Install MSSQL ODBC Driver",
   "description": "Install Microsoft SQL Server ODBC Driver and tools from Katello or Microsoft public repositories.",
   "category": "Database",
+  "approval": {"mode": "full"},
   "allowed_server_groups": [
     "*"
   ],
@@ -99,4 +100,3 @@
     }
   }
 }
-

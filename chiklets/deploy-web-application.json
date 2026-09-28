@@ -4,6 +4,7 @@
   "name": "Deploy Web Application",
   "description": "Deploy a versioned application package to an authorised Linux application server.",
   "category": "Application Deployment",
+  "approval": {"mode": "full"},
   "icon": "\u2b21",
   "allowed_server_groups": [
     "demo",

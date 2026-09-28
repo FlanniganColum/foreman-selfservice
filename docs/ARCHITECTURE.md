@@ -19,7 +19,15 @@ Authentication provider and authorization are independent. Entra, LDAP and local
 
 ## Change workflow
 
-`PENDING_APPROVAL -> APPROVED -> QUEUED -> RUNNING -> SUCCEEDED|FAILED|CANCELLED`
+Each Chiklet snapshots an `approval.mode` with one of three policies:
+
+| Mode | State transitions | Decision maker |
+| --- | --- | --- |
+| `none` | `APPROVED -> QUEUED -> RUNNING -> SUCCEEDED|FAILED|CANCELLED` | No approval; the job queues on submission. |
+| `business` | `PENDING_APPROVAL -> APPROVED -> QUEUED -> RUNNING -> SUCCEEDED|FAILED|CANCELLED` | The server's assigned business owner; no variable overrides. |
+| `full` (default) | `PENDING_APPROVAL -> PENDING_LINUX_APPROVAL -> APPROVED -> QUEUED -> RUNNING -> SUCCEEDED|FAILED|CANCELLED` | Technical or business owner, then a different Linux administrator with validated overrides. |
+
+The requester cannot approve their own request. An optional `identity_binding` injects the verified LDAP or Entra username into a fixed Chiklet field on submission.
 
 Rejected requests terminate at `REJECTED`. A submitted request stores the Chiklet definition, values and target snapshot so later configuration changes cannot silently alter an approval.
 
