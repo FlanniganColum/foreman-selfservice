@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+<a class="back" href="{{ url_for('approvals.index') }}">← Approval queue</a>
+<div class="page-heading"><div><div class="eyebrow">{{ item.request_number }}</div>
+  <h1>{{ 'Business owner approval' if stage == 'business' else 'Server owner approval' if stage == 'owner' else 'Linux administrator approval' }}</h1>
+  <p>{{ item.chiklet_name }} for <strong>{{ item.target_snapshot.name }}</strong></p></div></div>
+<section class="card">
+  <p>Requested by {{ item.requested_by.display_name or item.requested_by.username }}.
+    <a href="{{ url_for('requests.detail', request_id=item.id) }}">View request and approval trail</a>.</p>
+  {% if item.justification %}<p><strong>Justification:</strong> {{ item.justification }}</p>{% endif %}
+  {% if stage in ['owner', 'business'] %}
+    <h2>Submitted variables</h2>
+    <div class="params">{% for key, value in (item.submitted_form_data or item.form_data).items() %}
+      <div><span>{{ key|replace('_', ' ') }}</span><code>{{ '[Stored securely]' if (item.config_snapshot.form_schema.properties.get(key) or {}).get('x-sensitive') else value }}</code></div>
+    {% endfor %}</div>
+    <p class="muted">{{ 'Your approval queues the Foreman job.' if stage == 'business' else 'Your approval sends this request to Linux administrators. It does not start a Foreman job.' }}</p>
+  {% else %}
+    <h2>Review and override variables</h2>
+    <p>Check a field to replace its value. Unchecked fields keep the submitted value. Sensitive fields are blank and will be stored in Vault if changed.</p>
+  {% endif %}
+</section>
+{% if stage == 'linux' %}
+<form class="card stack" method="post" action="{{ url_for('approvals.approve', request_id=item.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  {% for group in form_layout %}
+  <fieldset class="form-section"><legend>{{ group.name }}</legend>
+    {% for field in group.fields %}
+      <div class="approval-override">
+        <strong>{{ field.title }}</strong>
+        <span class="muted">Current: {{ '[Stored securely]' if field.spec.get('x-sensitive') else (item.form_data.get(field.name, '—')) }}</span>
+        {% if field.readonly %}
+          <span class="field-badge">Fixed by Chiklet</span>
+        {% else %}
+          <label class="check"><input type="checkbox" name="override_fields" value="{{ field.name }}"> Override this value</label>
+          {% if field.widget == 'select' %}
+            <select name="field__{{ field.name }}"><option value="">Select…</option>
+              {% for option in field.options %}<option value="{{ option.value }}" {% if field.value == option.value %}selected{% endif %}>{{ option.label }}</option>{% endfor %}
+            </select>
+          {% elif field.widget == 'multiselect' %}
+            <select name="field__{{ field.name }}" multiple>
+              {% for option in field.options %}<option value="{{ option.value }}" {% if option.value in (field.value or []) %}selected{% endif %}>{{ option.label }}</option>{% endfor %}
+            </select>
+          {% elif field.widget == 'toggle' %}
+            <select name="field__{{ field.name }}"><option value="true" {% if field.value %}selected{% endif %}>Enabled</option>
+              <option value="false" {% if not field.value %}selected{% endif %}>Disabled</option></select>
+          {% elif field.widget in ['textarea', 'secret-textarea'] %}
+            <textarea name="field__{{ field.name }}" rows="4" {% if field.spec.get('x-sensitive') %}autocomplete="off" spellcheck="false"{% endif %}>{{ '' if field.spec.get('x-sensitive') else (field.value if field.value is not none else '') }}</textarea>
+          {% else %}
+            <input name="field__{{ field.name }}"
+              type="{{ 'password' if field.spec.get('x-sensitive') else ('number' if field.widget == 'number' else ('date' if field.widget == 'date' else ('datetime-local' if field.widget == 'datetime-local' else 'text'))) }}"
+              {% if field.widget == 'number' %}step="{{ '1' if field.spec.type == 'integer' else 'any' }}"{% endif %}
+              value="{{ '' if field.spec.get('x-sensitive') else (field.value if field.value is not none else '') }}"
+              {% if field.spec.get('x-sensitive') %}autocomplete="new-password"{% endif %}>
+          {% endif %}
+        {% endif %}
+      </div>
+    {% endfor %}
+  </fieldset>
+  {% endfor %}
+  <label>Review comment<input name="comment" maxlength="2000" placeholder="Do not include passwords or private keys"></label>
+  <button class="button success">Approve & queue Foreman job</button>
+</form>
+{% else %}
+<form class="card stack" method="post" action="{{ url_for('approvals.approve', request_id=item.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label>Approval comment<input name="comment" maxlength="2000" placeholder="Do not include passwords or private keys"></label>
+  <button class="button success">{{ 'Approve & queue Foreman job' if stage == 'business' else 'Approve for Linux review' }}</button>
+</form>
+{% endif %}
+<form class="card stack" method="post" action="{{ url_for('approvals.reject', request_id=item.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <label>Reason for rejection<input name="comment" maxlength="2000" required></label>
+  <button class="button danger-btn">Reject request</button>
+</form>
+{% endblock %}

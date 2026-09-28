@@ -8,6 +8,8 @@
   const statusIntervalMs=4000;
   const outputIntervalMs=8000;
   let currentStatus=panel.dataset.currentStatus||"";
+  const businessOnly=panel.dataset.approvalMode==="business";
+  let ownerApproved=Boolean(document.querySelector('[data-step="owner"].done'));
   let hasForemanJob=panel.dataset.hasForemanJob==="true";
   let statusTimer=null;
   let outputTimer=null;
@@ -29,6 +31,7 @@
   const fullscreenButton=document.getElementById("toggle-execution-fullscreen");
 
   function textStatus(value){
+    if(value==="pending_approval")return businessOnly?"Pending business approval":"Pending owner approval";
     return (value||"").replaceAll("_"," ");
   }
 
@@ -41,6 +44,7 @@
 
   function updateSteps(status,foremanId){
     setStep("submitted","done");
+    setStep("owner",ownerApproved||["pending_linux_approval","approved","queued","running","succeeded","failed","cancelled"].includes(status)?"done":status==="rejected"?"failed":"");
     setStep("approved",["approved","queued","running","succeeded","failed","cancelled"].includes(status)?"done":status==="rejected"?"failed":"");
     setStep("foreman",foremanId?"done":"");
 
@@ -56,6 +60,7 @@
 
   function updateStatusUI(d){
     currentStatus=d.status||currentStatus;
+    ownerApproved=Boolean(d.owner_approved);
     hasForemanJob=Boolean(d.foreman_job_id);
     panel.dataset.currentStatus=currentStatus;
     panel.dataset.hasForemanJob=hasForemanJob?"true":"false";

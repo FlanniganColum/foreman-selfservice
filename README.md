@@ -8,10 +8,10 @@ Production-oriented Flask portal for controlled Foreman + Ansible self-service a
 - Local Argon2 password authentication for local/break-glass accounts
 - JSON Schema-driven application **Chiklets**
 - Role + server-group RBAC
-- Mandatory approval and self-approval prevention
+- Two-stage server owner and Linux administrator approval with self-approval prevention
 - Foreman API v2 job submission and periodic status reconciliation
 - PostgreSQL, Redis, Celery worker/scheduler
-- Audit events and immutable request/config snapshots
+- Audit events, original request snapshots, and tracked administrator overrides
 - Nginx TLS 1.2/1.3 with local self-signed fallback
 - Responsive light enterprise UI
 - Docker Compose for development/testing plus Helm/Kubernetes production deployment
@@ -63,7 +63,16 @@ docker compose exec web flask --app wsgi:app portal sync-hosts
 ```
 Browse to `https://localhost`. Nginx creates a self-signed development certificate if none is mounted.
 
-Sign in using the bootstrap local account. In **Administration**, assign the account to **Demo Servers**. Sample Chiklets then appear.
+Sign in using the bootstrap local account. In **Administration**, assign users to **Demo Servers**, assign each server a technical and/or business owner, and give Linux reviewers the **Linux admin** role. Sample Chiklets then appear for entitled users. Chiklets requiring approval need an eligible server owner other than the requester.
+
+## Two-stage approval
+
+1. A technical or business owner assigned to the target server approves the original request. Either owner may give the one required owner approval. No job starts at this stage.
+2. A user with the `linux_admin` role (or a global administrator) reviews the request, may override editable Chiklet fields, and gives final approval. Only then is the Foreman job queued.
+
+The requester cannot approve either stage, and the owner approver cannot also give final approval. Original non-sensitive values remain visible in the request history; any non-sensitive overrides are shown alongside them. Sensitive overrides are saved as new Vault references and are never included in audit details. Fixed (`readOnly`) Chiklet fields cannot be overridden. New servers imported from Foreman need owner assignments in Administration to receive requests that require approval. Existing pending requests also require an owner assignment before progressing.
+
+Each Chiklet can set `approval.mode` to `none` (queue immediately), `business` (the assigned business owner approves and queues), or `full` (server owner followed by a Linux administrator). Omitting it defaults to `full`. Self-service tasks can set `identity_binding` to supply the LDAP or Entra authenticated username as a fixed Foreman input. See [Chiklet form schema](docs/CHIKLETS.md) for configuration and password reset safeguards.
 
 ## TLS / HTTPS
 If no certificate is supplied, the Nginx container automatically generates a persistent self-signed development certificate in `secrets/tls/`. For production, place the CA-issued chain in `secrets/tls/fullchain.pem` and matching private key in `secrets/tls/privkey.pem`. See [`docs/TLS.md`](docs/TLS.md) for installation, PFX conversion, validation and client trust instructions.

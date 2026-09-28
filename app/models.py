@@ -20,10 +20,10 @@ approver_server_groups = db.Table(
 )
 
 class AppRole(str, Enum):
-    USER="user"; APPROVER="approver"; ADMIN="admin"; AUDITOR="auditor"; GLOBAL_ADMIN="global_admin"
+    USER="user"; APPROVER="approver"; LINUX_ADMIN="linux_admin"; ADMIN="admin"; AUDITOR="auditor"; GLOBAL_ADMIN="global_admin"
 
 class RequestStatus(str, Enum):
-    PENDING_APPROVAL="pending_approval"; REJECTED="rejected"; APPROVED="approved"; QUEUED="queued"; RUNNING="running"; SUCCEEDED="succeeded"; FAILED="failed"; CANCELLED="cancelled"
+    PENDING_APPROVAL="pending_approval"; PENDING_LINUX_APPROVAL="pending_linux_approval"; REJECTED="rejected"; APPROVED="approved"; QUEUED="queued"; RUNNING="running"; SUCCEEDED="succeeded"; FAILED="failed"; CANCELLED="cancelled"
 
 class User(db.Model, UserMixin):
     __tablename__="users"
@@ -44,6 +44,9 @@ class User(db.Model, UserMixin):
     def is_active(self): return self.enabled
     def has_role(self,*roles): return self.role in set(roles)
     def is_global_admin(self): return self.role==AppRole.GLOBAL_ADMIN.value
+    def is_server_owner(self):
+        return db.session.scalar(db.select(Server.id).where(
+            (Server.technical_owner_id == self.id) | (Server.business_owner_id == self.id)).limit(1)) is not None
     def can_approve_group(self,group_id):
         if self.is_global_admin() or self.role==AppRole.ADMIN.value: return True
         return self.role==AppRole.APPROVER.value and any(g.id==group_id for g in self.approval_groups)
@@ -54,6 +57,7 @@ class AuthIdentity(db.Model):
     user_id=db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     provider=db.Column(db.String(32), nullable=False)
     subject=db.Column(db.String(255), nullable=False)
+    authenticated_username=db.Column(db.String(255))
     created_at=db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
     user=db.relationship("User", back_populates="identities")
     __table_args__=(UniqueConstraint("provider","subject",name="uq_auth_identity_provider_subject"),)
@@ -87,10 +91,14 @@ class Server(db.Model):
     ip_address=db.Column(db.String(64))
     environment=db.Column(db.String(120))
     group_id=db.Column(db.Integer, db.ForeignKey("server_groups.id"), nullable=False, index=True)
+    technical_owner_id=db.Column(db.Integer, db.ForeignKey("users.id"), index=True)
+    business_owner_id=db.Column(db.Integer, db.ForeignKey("users.id"), index=True)
     enabled=db.Column(db.Boolean, nullable=False, default=True)
     foreman_metadata=db.Column(db.JSON)
     last_synced_at=db.Column(db.DateTime(timezone=True))
     group=db.relationship("ServerGroup", back_populates="servers")
+    technical_owner=db.relationship("User", foreign_keys=[technical_owner_id])
+    business_owner=db.relationship("User", foreign_keys=[business_owner_id])
 
 class DeploymentRequest(db.Model):
     __tablename__="deployment_requests"
@@ -104,6 +112,7 @@ class DeploymentRequest(db.Model):
     status=db.Column(db.String(32), nullable=False, default=RequestStatus.PENDING_APPROVAL.value, index=True)
     justification=db.Column(db.Text)
     form_data=db.Column(db.JSON, nullable=False)
+    submitted_form_data=db.Column(db.JSON)
     config_snapshot=db.Column(db.JSON, nullable=False)
     target_snapshot=db.Column(db.JSON, nullable=False)
     created_at=db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
@@ -113,7 +122,7 @@ class DeploymentRequest(db.Model):
     completed_at=db.Column(db.DateTime(timezone=True))
     requested_by=db.relationship("User", foreign_keys=[requested_by_id])
     server_group=db.relationship("ServerGroup")
-    approvals=db.relationship("Approval", back_populates="request", cascade="all, delete-orphan")
+    approvals=db.relationship("Approval", back_populates="request", cascade="all, delete-orphan", order_by="Approval.id")
     execution=db.relationship("JobExecution", back_populates="request", uselist=False, cascade="all, delete-orphan")
 
 class Approval(db.Model):
@@ -122,6 +131,7 @@ class Approval(db.Model):
     request_id=db.Column(db.String(36), db.ForeignKey("deployment_requests.id", ondelete="CASCADE"), nullable=False, index=True)
     approver_id=db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     decision=db.Column(db.String(16), nullable=False)
+    stage=db.Column(db.String(16), nullable=False, default="owner")
     comment=db.Column(db.Text)
     decided_at=db.Column(db.DateTime(timezone=True), default=utcnow, nullable=False)
     request=db.relationship("DeploymentRequest", back_populates="approvals")

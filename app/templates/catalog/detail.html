@@ -145,8 +145,17 @@
         </div>
       </fieldset>
 
-      <div class="callout">Submitting creates an immutable snapshot of ordinary values for approval. Sensitive fields are stored in Vault and only their references are retained. No Foreman API job is started until an authorised approver accepts it.</div>
+      {% set approval_mode = chiklet.get('approval', {}).get('mode', 'full') %}
+      {% if approval_mode == 'none' %}
+      <div class="callout">This request starts automatically after submission. Sensitive values are stored in Vault.</div>
+      <button class="button primary">Submit and run</button>
+      {% elif approval_mode == 'business' %}
+      <div class="callout">The assigned business owner reviews this request. Foreman starts after their approval. Sensitive values are stored in Vault.</div>
+      <button class="button primary">Submit for business approval</button>
+      {% else %}
+      <div class="callout">Submitting records the original values. Your server's technical or business owner reviews first, followed by a Linux administrator who may override editable variables. Foreman starts only after both approvals. Sensitive values are stored in Vault and never shown to approvers.</div>
       <button class="button primary">Submit for approval</button>
+      {% endif %}
     </form>
   </section>
 
@@ -162,7 +171,7 @@
     </div>
     <h3>Execution policy</h3>
     <dl>
-      <dt>Approval</dt><dd>Required</dd>
+      <dt>Approval</dt><dd>{{ 'Not required' if chiklet.get('approval', {}).get('mode', 'full') == 'none' else 'Business owner' if chiklet.get('approval', {}).get('mode', 'full') == 'business' else 'Server owner, then Linux administrator' }}</dd>
       <dt>Target</dt><dd>Authorised server only</dd>
       <dt>Automation</dt><dd>{{ chiklet.foreman.job_template_name or ('Template #' ~ chiklet.foreman.job_template_id) }}</dd>
       <dt>Audit</dt><dd>Full request & execution history</dd>

@@ -8,7 +8,7 @@
     <h1>{{ item.chiklet_name }}</h1>
     <p>Target: <strong>{{ item.target_snapshot.name }}</strong></p>
   </div>
-  <span id="request-status" class="status {{ item.status }}">{{ item.status|replace('_',' ') }}</span>
+  <span id="request-status" class="status {{ item.status }}">{{ 'Pending business approval' if item.status == 'pending_approval' and item.config_snapshot.get('approval', {}).get('mode') == 'business' else 'Pending owner approval' if item.status == 'pending_approval' else item.status|replace('_',' ') }}</span>
 </div>
 
 <div class="detail-layout">
@@ -17,6 +17,8 @@
     <div class="kv-grid">
       <div><span>Requested by</span><b>{{ item.requested_by.display_name or item.requested_by.username }}</b></div>
       <div><span>Server group</span><b>{{ item.server_group.name }}</b></div>
+      <div><span>Technical owner</span><b>{{ owners.technical.display_name or owners.technical.username if owners.technical else 'Unassigned' }}</b></div>
+      <div><span>Business owner</span><b>{{ owners.business.display_name or owners.business.username if owners.business else 'Unassigned' }}</b></div>
       <div><span>Submitted</span><b>{{ item.submitted_at.strftime('%Y-%m-%d %H:%M:%S') }}</b></div>
       <div><span>Version</span><b>{{ item.chiklet_version }}</b></div>
     </div>
@@ -28,6 +30,19 @@
       {% endfor %}
     </div>
 
+    {% if item.submitted_form_data and item.submitted_form_data != item.form_data %}
+    <h3>Linux administrator overrides</h3>
+    <div class="params">
+      {% for key,value in item.form_data.items() if item.submitted_form_data.get(key) != value %}
+      <div><span>{{ key|replace('_',' ') }}</span><code>
+        {% if (item.config_snapshot.form_schema.properties.get(key) or {}).get('x-sensitive') %}Sensitive value replaced; both versions stored in Vault{% else %}
+          {{ item.submitted_form_data.get(key) }} → {{ value }}
+        {% endif %}
+      </code></div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
     {% if item.justification %}
     <h3>Justification</h3>
     <p>{{ item.justification }}</p>
@@ -38,12 +53,12 @@
     <div class="timeline-row">
       <span class="dot"></span>
       <div>
-        <b>{{ a.decision|title }}</b> by {{ a.approver.display_name or a.approver.username }}
+        <b>{{ 'Business owner' if a.stage == 'business' else 'Server owner' if a.stage == 'owner' else 'Linux administrator' }} {{ a.decision }}</b> by {{ a.approver.display_name or a.approver.username }}
         <small>{{ a.decided_at.strftime('%Y-%m-%d %H:%M:%S') }}{% if a.comment %} · {{ a.comment }}{% endif %}</small>
       </div>
     </div>
     {% else %}
-    <p class="muted">Awaiting an authorised approver.</p>
+    <p class="muted">{{ 'No approval required by this Chiklet.' if item.config_snapshot.get('approval', {}).get('mode', 'full') == 'none' else 'Awaiting business owner approval.' if item.config_snapshot.get('approval', {}).get('mode', 'full') == 'business' else 'Awaiting server owner approval.' }}</p>
     {% endfor %}
   </section>
 
@@ -51,6 +66,7 @@
     class="card execution-card"
     data-status-url="{{ url_for('api.request_status',request_id=item.id) }}"
     data-current-status="{{ item.status }}"
+    data-approval-mode="{{ item.config_snapshot.get('approval', {}).get('mode', 'full') }}"
     data-has-foreman-job="{{ 'true' if item.execution and item.execution.foreman_job_id else 'false' }}"
   >
     <div class="execution-heading">
@@ -72,7 +88,14 @@
 
     <div class="progress-steps" id="execution-steps">
       <div data-step="submitted" class="done">Request submitted</div>
-      <div data-step="approved" class="{% if item.approved_at %}done{% endif %}">Approved</div>
+      {% if item.config_snapshot.get('approval', {}).get('mode', 'full') == 'none' %}
+      <div class="done">Approval not required</div>
+      {% elif item.config_snapshot.get('approval', {}).get('mode', 'full') == 'business' %}
+      <div data-step="owner" class="{% if item.approvals and item.approvals[0].stage == 'business' and item.approvals[0].decision == 'approved' %}done{% endif %}">Business owner approval</div>
+      {% else %}
+      <div data-step="owner" class="{% if item.approvals and item.approvals[0].stage == 'owner' and item.approvals[0].decision == 'approved' %}done{% endif %}">Server owner approval</div>
+      <div data-step="approved" class="{% if item.approved_at %}done{% endif %}">Linux administrator approval</div>
+      {% endif %}
       <div data-step="foreman" class="{% if item.execution and item.execution.foreman_job_id %}done{% endif %}">Sent to Foreman</div>
       <div data-step="ansible" class="{% if item.status == 'running' %}active{% elif item.status in ['succeeded','failed','cancelled'] %}done{% endif %}">Ansible execution</div>
       <div data-step="completed" class="{% if item.status in ['succeeded','failed','cancelled'] %}done{% endif %}">Completed</div>
@@ -92,7 +115,7 @@
       </div>
       <pre id="job-output" class="job-output" tabindex="0">Waiting for Foreman output…</pre>
     </div>
-    <div id="output-placeholder" class="output-placeholder muted"{% if item.execution and item.execution.foreman_job_id %} hidden{% endif %}>Foreman output will appear here after the request is approved and submitted.</div>
+    <div id="output-placeholder" class="output-placeholder muted"{% if item.execution and item.execution.foreman_job_id %} hidden{% endif %}>Foreman output will appear here when the job starts.</div>
 
     {% if item.execution and item.execution.error_message %}
     <div class="alert danger" id="execution-error">{{ item.execution.error_message }}</div>

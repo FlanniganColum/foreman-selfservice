@@ -1,4 +1,4 @@
-from flask import Blueprint,current_app,flash,redirect,render_template,request,url_for
+from flask import Blueprint,current_app,flash,redirect,render_template,request,url_for,session
 from flask_login import current_user,login_user,logout_user
 from ..extensions import db,limiter
 from ..audit.service import audit
@@ -18,6 +18,7 @@ def local_login():
     user,error=verify_local(request.form.get("username","").strip(),request.form.get("password",""))
     if not user:
         audit("LOGIN_FAILED",details={"provider":"local","username":request.form.get("username","")}); db.session.commit(); flash(error or "Sign-in failed","danger"); return redirect(url_for("auth.login"))
+    session.pop("authenticated_identity_id",None)
     login_user(user); user.last_login_at=utcnow(); audit("LOGIN_SUCCEEDED",details={"provider":"local"}); db.session.commit()
     return redirect(url_for("catalog.index"))
 
@@ -45,4 +46,5 @@ def entra_callback():
 @bp.post("/logout")
 def logout():
     if current_user.is_authenticated: audit("LOGOUT"); db.session.commit()
+    session.pop("authenticated_identity_id",None)
     logout_user(); return redirect(url_for("auth.login"))

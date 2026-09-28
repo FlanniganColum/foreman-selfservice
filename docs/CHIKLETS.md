@@ -1,6 +1,6 @@
 # Chiklet form schema
 
-Chiklet JSON files are the source of truth for the Self-Service application form. The portal reads each Chiklet dynamically, renders the form controls from `form_schema`, validates the submitted values against the same JSON Schema, stores the approved values in the immutable request snapshot, and maps those values into Foreman job-template inputs using `foreman.input_map`.
+Chiklet JSON files are the source of truth for the Self-Service application form. The portal reads each Chiklet dynamically, renders the form controls from `form_schema`, validates the submitted values against the same JSON Schema, preserves the original submission and final approved values, and maps the final values into Foreman job-template inputs using `foreman.input_map`.
 
 ## Example
 
@@ -13,6 +13,7 @@ Chiklet JSON files are the source of truth for the Self-Service application form
   "category": "Database",
   "icon": {"type": "image", "src": "mssql.svg", "alt": "Microsoft SQL Server"},
   "allowed_server_groups": ["*"],
+  "approval": {"mode": "full"},
   "form_schema": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -99,6 +100,43 @@ Chiklet JSON files are the source of truth for the Self-Service application form
 }
 ```
 
+## Approval and verified username
+
+Set `approval.mode` per Chiklet. The policy is defined in JSON and cannot be changed in the request form:
+
+| JSON | Decision and execution |
+| --- | --- |
+| `"approval": {"mode": "none"}` | No approval; queue the Foreman job when submitted. |
+| `"approval": {"mode": "business"}` | The target server's assigned business owner approves; queue the job. No Linux review or variable override. |
+| `"approval": {"mode": "full"}` | The server's technical or business owner approves, then a different Linux administrator (or global administrator) can override editable variables and approve; queue the job. |
+
+Omitting `approval` defaults to `full`. The requester cannot approve their own request. `business` requires an enabled business owner other than the requester; `full` requires an enabled technical or business owner other than the requester. Restrict write access to Chiklet JSON files, particularly those configured with `none`.
+
+For a self-service password reset, bind the target account to the username verified during LDAP or Entra sign-in:
+
+```json
+"approval": {"mode": "none"},
+"identity_binding": {
+  "username_field": "account_username",
+  "providers": ["ldap", "entra"]
+},
+"form_schema": {
+  "type": "object",
+  "properties": {
+    "account_username": {"type": "string", "title": "Account username"}
+  },
+  "required": ["account_username"]
+},
+"foreman": {
+  "job_template_name": "SelfService - Reset my password",
+  "input_map": {"account_username": "account_username"}
+}
+```
+
+Merge this fragment into a complete Chiklet, including `id`, `version`, `name`, `description`, `icon`, and `allowed_server_groups`. Configure the password or generated password as an `x-sensitive` field and map it to the template if needed. The bound username is displayed as fixed, ignored if a browser submits a replacement, and cannot be overridden by a Linux administrator. The portal stores the LDAP username attribute or Entra `preferred_username` (falling back to email) against the signed-in identity and refreshes it on sign-in. A local login or an older session without a verified username cannot use this Chiklet. The directory attribute/Entra claim must match the account naming expected by the Foreman job. The job template must use **only** this bound input to select the target account; do not provide a second editable target or derive the target from the server, justification, or other fields. Verify the Foreman template's own authorization and target handling before making a reset Chiklet approval-free.
+
+The `identity_binding.username_field` must be a string property without a default, included in `foreman.input_map`; `providers` accepts `ldap`, `entra`, or both. Both policies can use identity binding.
+
 ## Rendering rules
 
 The portal infers controls from JSON Schema:
@@ -144,6 +182,8 @@ The left side is the Foreman job-template input name. The right side is the Chik
 ```
 
 Every `input_map` source must exist in `form_schema.properties`. Invalid Chiklet definitions are rejected when loaded rather than allowing an unmapped or hidden value to reach Foreman.
+
+With `full` approval, Linux administrators can override editable fields at the second approval stage. The portal validates every override against the Chiklet schema and does not permit overriding `readOnly` fields or the target server. Original values remain in `submitted_form_data` for review. A sensitive override gets a new Vault KV v2 path; approval and audit records retain only the changed field names. Foreman receives the final values after both approval stages. The `business` and `none` modes do not offer overrides.
 
 ## Security
 

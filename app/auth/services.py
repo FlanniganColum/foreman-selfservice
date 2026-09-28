@@ -3,12 +3,22 @@ from datetime import timedelta
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError
 from flask import current_app, session
+from flask_login import current_user
 from ldap3 import Server, Connection, ALL, SUBTREE, Tls
 from ldap3.utils.conv import escape_filter_chars
 from ..extensions import db
 from ..models import User, AuthIdentity, LocalCredential, utcnow
 
 ph=PasswordHasher(time_cost=3,memory_cost=65536,parallelism=4)
+
+def authenticated_username(providers):
+    """Return the username verified at this sign-in, never a submitted value."""
+    if not current_user.is_authenticated or not current_user.enabled: return None
+    identity_id=session.get("authenticated_identity_id")
+    if not isinstance(identity_id,int): return None
+    identity=db.session.get(AuthIdentity,identity_id)
+    if not identity or identity.user_id!=current_user.id or identity.provider not in providers: return None
+    return identity.authenticated_username or None
 
 def set_local_password(user,password):
     cred=user.local_credential or LocalCredential(user=user,password_hash="")
@@ -49,7 +59,8 @@ def authenticate_ldap(username,password):
             service.unbind(); return None,"Invalid username or password"
         entry=service.entries[0]; user_dn=entry.entry_dn; server=service.server; service.unbind()
         probe=Connection(server,user=user_dn,password=password,auto_bind=True); probe.unbind()
-        directory_username=str(entry[cfg["LDAP_USERNAME_ATTRIBUTE"]].value or username)
+        directory_username=str(entry[cfg["LDAP_USERNAME_ATTRIBUTE"]].value or "").strip()
+        if not directory_username: return None,"Directory account is missing a username attribute"
         email=str(entry[cfg["LDAP_EMAIL_ATTRIBUTE"]].value or "") or None
         display_name=str(entry[cfg["LDAP_DISPLAYNAME_ATTRIBUTE"]].value or directory_username)
         ident=db.session.scalar(db.select(AuthIdentity).where(AuthIdentity.provider=="ldap",AuthIdentity.subject==user_dn))
@@ -60,9 +71,11 @@ def authenticate_ldap(username,password):
                 return None,"An account with this username already exists under another identity provider; an administrator must resolve the identity mapping"
             if not user:
                 user=User(username=directory_username,email=email,display_name=display_name); db.session.add(user); db.session.flush()
-            db.session.add(AuthIdentity(user=user,provider="ldap",subject=user_dn))
+            ident=AuthIdentity(user=user,provider="ldap",subject=user_dn); db.session.add(ident)
         else: return None,"Account is not provisioned"
         if not user.enabled: return None,"Account is disabled"
+        ident.authenticated_username=directory_username
+        db.session.flush(); session["authenticated_identity_id"]=ident.id
         user.email=email or user.email; user.display_name=display_name or user.display_name; user.last_login_at=utcnow()
         return user,None
     except Exception:
@@ -81,7 +94,7 @@ def complete_entra_flow(auth_response):
     try: result=_msal_app().acquire_token_by_auth_code_flow(session.pop("entra_flow",{}),auth_response)
     except ValueError: return None,"Invalid or expired authentication response"
     if "error" in result: return None,result.get("error_description","Microsoft Entra authentication failed")
-    claims=result.get("id_token_claims",{}); subject=claims.get("oid") or claims.get("sub"); username=claims.get("preferred_username") or claims.get("email") or subject
+    claims=result.get("id_token_claims",{}); subject=claims.get("oid") or claims.get("sub"); username=claims.get("preferred_username") or claims.get("email")
     if not subject or not username: return None,"Entra token is missing required identity claims"
     ident=db.session.scalar(db.select(AuthIdentity).where(AuthIdentity.provider=="entra",AuthIdentity.subject==subject))
     if ident: user=ident.user
@@ -91,8 +104,10 @@ def complete_entra_flow(auth_response):
             return None,"An account with this username already exists under another identity provider; an administrator must resolve the identity mapping"
         if not user:
             user=User(username=username,email=claims.get("email") or claims.get("preferred_username"),display_name=claims.get("name") or username); db.session.add(user); db.session.flush()
-        db.session.add(AuthIdentity(user=user,provider="entra",subject=subject))
+        ident=AuthIdentity(user=user,provider="entra",subject=subject); db.session.add(ident)
     else: return None,"Account is not provisioned"
     if not user.enabled: return None,"Account is disabled"
+    ident.authenticated_username=username
+    db.session.flush(); session["authenticated_identity_id"]=ident.id
     user.display_name=claims.get("name") or user.display_name; user.email=claims.get("email") or claims.get("preferred_username") or user.email; user.last_login_at=utcnow()
     return user,None

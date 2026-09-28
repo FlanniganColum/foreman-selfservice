@@ -1,0 +1,5 @@
+.status.pending_linux_approval{background:#fff1d4;color:#825b0b}
+.approval-override{border-bottom:1px solid var(--line);padding:14px 0;display:grid;gap:8px}
+.approval-override .check{display:flex;gap:8px}
+.approval-override .check input{width:auto}
+.approval-override .muted{overflow-wrap:anywhere}
