@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Servers · Foreman Self-Service{% endblock %}
+{% macro keep_filters() %}
+  <input type="hidden" name="filter_q" value="{{ q }}">
+  <input type="hidden" name="filter_group_id" value="{{ group_id }}">
+  <input type="hidden" name="filter_environment" value="{{ environment }}">
+  <input type="hidden" name="filter_status" value="{{ status }}">
+  <input type="hidden" name="page" value="{{ page }}">
+{% endmacro %}
+{% block content %}
+<div class="page-heading">
+  <div><div class="eyebrow">INVENTORY</div><h1>Servers</h1><p>Find Foreman hosts and manage their group and owners.</p></div>
+  <form method="post" action="{{ url_for('admin.sync_foreman') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="button primary">Sync Foreman hosts</button>
+  </form>
+</div>
+<form class="card server-filters" method="get" action="{{ url_for('admin.servers') }}" role="search">
+  <label for="server-search">Search by name, IP, or Foreman ID
+    <input id="server-search" name="q" type="search" value="{{ q }}" placeholder="e.g. web01 or 10.0.0.12">
+  </label>
+  <label for="server-group">Server group
+    <select id="server-group" name="group_id"><option value="">All groups</option>{% for group in groups %}
+      <option value="{{ group.id }}" {% if group_id == group.id|string %}selected{% endif %}>{{ group.name }}</option>
+    {% endfor %}</select>
+  </label>
+  <label for="server-environment">Environment
+    <select id="server-environment" name="environment"><option value="">All environments</option>{% for item in environments %}
+      <option value="{{ item }}" {% if environment == item %}selected{% endif %}>{{ item }}</option>
+    {% endfor %}</select>
+  </label>
+  <label for="server-status">Status
+    <select id="server-status" name="status">
+      <option value="">All statuses</option>
+      <option value="enabled" {% if status == 'enabled' %}selected{% endif %}>Enabled</option>
+      <option value="disabled" {% if status == 'disabled' %}selected{% endif %}>Disabled</option>
+    </select>
+  </label>
+  <div class="server-filter-actions"><button class="button primary">Apply filters</button><a href="{{ url_for('admin.servers') }}">Clear</a></div>
+</form>
+<section class="card" aria-label="Server results">
+  <div class="server-results-heading"><p role="status">{{ total }} server{{ '' if total == 1 else 's' }} found · Page {{ page }} of {{ pages }}</p></div>
+  {% if servers %}
+  <div class="table-card"><table>
+    <thead><tr><th scope="col">Server</th><th scope="col">IP / Foreman ID</th><th scope="col">Environment</th><th scope="col">Status</th><th scope="col">Group</th><th scope="col">Owners</th><th scope="col">Actions</th></tr></thead>
+    <tbody>{% for server in servers %}<tr>
+      <td><strong>{{ server.name }}</strong></td>
+      <td>{{ server.ip_address or '—' }}<small>ID {{ server.foreman_host_id }}</small></td>
+      <td>{{ server.environment or '—' }}</td>
+      <td><span class="status {{ 'succeeded' if server.enabled else 'failed' }}">{{ 'Enabled' if server.enabled else 'Disabled' }}</span></td>
+      <td>{{ server.group.name }}</td>
+      <td><span class="server-owner-label">Technical: {{ server.technical_owner.display_name or server.technical_owner.username if server.technical_owner else 'None' }}</span><span class="server-owner-label">Business: {{ server.business_owner.display_name or server.business_owner.username if server.business_owner else 'None' }}</span></td>
+      <td><details class="server-edit"><summary>Manage</summary>
+        <form method="post" action="{{ url_for('admin.assign_server_owners',server_id=server.id) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{{ keep_filters() }}
+          <label>Technical owner<select name="technical_owner_id"><option value="">None</option>{% for user in users %}<option value="{{ user.id }}" {% if server.technical_owner_id == user.id %}selected{% endif %}>{{ user.display_name or user.username }}</option>{% endfor %}</select></label>
+          <label>Business owner<select name="business_owner_id"><option value="">None</option>{% for user in users %}<option value="{{ user.id }}" {% if server.business_owner_id == user.id %}selected{% endif %}>{{ user.display_name or user.username }}</option>{% endfor %}</select></label>
+          <button class="button small secondary">Save owners</button>
+        </form>
+        <form method="post" action="{{ url_for('admin.assign_server_group',server_id=server.id) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{{ keep_filters() }}
+          <label>Server group<select name="group_id">{% for group in groups %}<option value="{{ group.id }}" {% if server.group_id == group.id %}selected{% endif %}>{{ group.name }}</option>{% endfor %}</select></label>
+          <button class="button small secondary">Save group</button>
+        </form>
+      </details></td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}<div class="empty"><h2>No servers found</h2><p>Try another search or clear the filters.</p><a href="{{ url_for('admin.servers') }}">Clear filters</a></div>{% endif %}
+  {% if pages > 1 %}
+  <nav class="server-pagination" aria-label="Server pages">
+    {% if page > 1 %}<a class="button subtle" href="{{ url_for('admin.servers',q=q,group_id=group_id,environment=environment,status=status,page=page-1) }}">Previous</a>{% endif %}
+    <span>Page {{ page }} of {{ pages }}</span>
+    {% if page < pages %}<a class="button subtle" href="{{ url_for('admin.servers',q=q,group_id=group_id,environment=environment,status=status,page=page+1) }}">Next</a>{% endif %}
+  </nav>
+  {% endif %}
+</section>
+{% endblock %}

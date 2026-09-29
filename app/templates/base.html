@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="{{ url_for('static',filename='css/approvals.css') }}">
   <link rel="stylesheet" href="{{ url_for('static',filename='css/ux.css') }}">
   <link rel="stylesheet" href="{{ url_for('static',filename='css/profile.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static',filename='css/servers.css') }}">
   <script defer src="{{ url_for('static',filename='js/app.js') }}"></script>
 </head>
 <body>
@@ -19,6 +20,9 @@
   <nav aria-label="Primary">
     <a href="{{ url_for('catalog.index') }}" {% if request.blueprint == 'catalog' %}aria-current="page"{% endif %}>Applications</a>
     <a href="{{ url_for('requests.index') }}" {% if request.blueprint == 'requests' %}aria-current="page"{% endif %}>Requests</a>
+    {% if current_user.role in ['admin','global_admin'] %}
+    <a href="{{ url_for('admin.servers') }}" {% if request.endpoint == 'admin.servers' %}aria-current="page"{% endif %}>Servers</a>
+    {% endif %}
     {% if current_user.role in ['linux_admin','global_admin'] or current_user.is_server_owner() %}
     <a href="{{ url_for('approvals.index') }}" {% if request.blueprint == 'approvals' %}aria-current="page"{% endif %}>Approvals</a>
     {% endif %}
@@ -26,7 +30,7 @@
     <a href="{{ url_for('audit.index') }}" {% if request.blueprint == 'audit' %}aria-current="page"{% endif %}>Audit</a>
     {% endif %}
     {% if current_user.role in ['admin','global_admin'] %}
-    <a href="{{ url_for('admin.index') }}" {% if request.blueprint == 'admin' %}aria-current="page"{% endif %}>Administration</a>
+    <a href="{{ url_for('admin.index') }}" {% if request.endpoint == 'admin.index' %}aria-current="page"{% endif %}>Administration</a>
     {% endif %}
   </nav>
   <div class="identity">

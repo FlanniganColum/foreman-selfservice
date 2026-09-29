@@ -125,7 +125,7 @@ def test_business_owner_without_approver_role_can_review_and_admin_can_assign(ap
         server_id = db.session.scalar(db.select(Server).where(Server.name == "demo01")).id
         linux_id = db.session.scalar(db.select(User).where(User.username == "linuxadmin")).id
     login(client, "root")
-    page = client.get("/admin/")
+    page = client.get("/admin/servers")
     assert page.status_code == 200
     assert b"Business owner" in page.data
     assert client.post(f"/admin/servers/{server_id}/owners", data={
