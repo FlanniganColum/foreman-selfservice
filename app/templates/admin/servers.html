@@ -42,10 +42,11 @@
   <div class="server-results-heading"><p role="status">{{ total }} server{{ '' if total == 1 else 's' }} found · Page {{ page }} of {{ pages }}</p></div>
   {% if servers %}
   <div class="table-card"><table>
-    <thead><tr><th scope="col">Server</th><th scope="col">IP / Foreman ID</th><th scope="col">Environment</th><th scope="col">Status</th><th scope="col">Group</th><th scope="col">Owners</th><th scope="col">Actions</th></tr></thead>
+    <thead><tr><th scope="col">Server</th><th scope="col">IP address</th><th scope="col">Foreman ID</th><th scope="col">Environment</th><th scope="col">Status</th><th scope="col">Group</th><th scope="col">Owners</th><th scope="col">Actions</th></tr></thead>
     <tbody>{% for server in servers %}<tr>
       <td><strong>{{ server.name }}</strong></td>
-      <td>{{ server.ip_address or '—' }}<small>ID {{ server.foreman_host_id }}</small></td>
+      <td>{{ server.ip_address or '—' }}</td>
+      <td>{{ server.foreman_host_id }}</td>
       <td>{{ server.environment or '—' }}</td>
       <td><span class="status {{ 'succeeded' if server.enabled else 'failed' }}">{{ 'Enabled' if server.enabled else 'Disabled' }}</span></td>
       <td>{{ server.group.name }}</td>
