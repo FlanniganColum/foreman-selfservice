@@ -5,8 +5,8 @@ def make_celery(app):
     """Create and configure Celery so every task runs inside Flask context.
 
     Celery 5.x stores runtime configuration on ``celery.conf``.  The task
-    module is explicitly included so workers know about execution and
-    reconciliation tasks before the first job is submitted.
+    module is explicitly included so workers know about execution,
+    reconciliation, and inventory tasks before the first job is submitted.
     """
 
     class FlaskTask(Task):
@@ -33,6 +33,10 @@ def make_celery(app):
             "recover-approved-unsubmitted-jobs": {
                 "task": "app.jobs.tasks.recover_unqueued_requests",
                 "schedule": 30.0,
+            },
+            "sync-foreman-host-inventory": {
+                "task": "app.jobs.tasks.sync_foreman_hosts",
+                "schedule": app.config["FOREMAN_HOST_SYNC_INTERVAL_SECONDS"],
             },
         },
     )

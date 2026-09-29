@@ -49,6 +49,7 @@ config:
     verifyTls: true
     timeoutSeconds: 30
     reconcileIntervalSeconds: 5
+    hostSyncIntervalSeconds: 900 # Foreman host inventory sync every 15 minutes.
     mock: false
 
 foremanCa:

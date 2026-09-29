@@ -71,6 +71,8 @@ Sign in using the bootstrap local account. In **Administration**, assign users t
 
 Admins can open **Servers** in the navigation to search the Foreman inventory by name, IP address, or Foreman ID. Filter by server group, environment, and enabled status; results are paginated at 25 servers per page. Group and owner assignments, along with the Foreman sync action, are on this page. **Administration** contains users and server group management.
 
+The singleton scheduler automatically refreshes the host inventory from Foreman every 15 minutes. Set `FOREMAN_HOST_SYNC_INTERVAL_SECONDS` in `.env` (or `config.foreman.hostSyncIntervalSeconds` in Helm values) to change the interval in seconds; the minimum is 60. The **Sync Foreman hosts** button and `portal sync-hosts` command trigger an immediate refresh. Sync imports and updates hosts while keeping portal group and owner assignments; it does not remove hosts that disappear from Foreman.
+
 ## Local account password changes
 
 Users can open **My profile** from the header to see their sign-in method, username, role, server groups, server ownership, recent requests, and account security options. Locally signed-in users can update their own display name and email address there and select **Change password**. Usernames, roles, group membership, and server ownership remain administrator-managed. LDAP and Entra contact details and passwords are managed through their respective identity providers.

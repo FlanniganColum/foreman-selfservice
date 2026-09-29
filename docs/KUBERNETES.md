@@ -274,6 +274,8 @@ helm upgrade foreman-selfservice deploy/helm/foreman-selfservice \
 ```
 
 Never scale Celery Beat. The scheduler is intentionally fixed at one replica.
+It queues Foreman host inventory sync every 15 minutes by default; configure
+`config.foreman.hostSyncIntervalSeconds` in Helm values to change this interval.
 
 Upgrade:
 
