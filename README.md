@@ -2,6 +2,10 @@
 
 Production-oriented Flask portal for controlled Foreman + Ansible self-service automation.
 
+## License
+
+Copyright © 2026 Colum Flannigan. This project is available under the [MIT License](LICENSE). Anyone may use, modify, and redistribute it free of charge, including commercially, provided the copyright and license notice is retained. Dependencies and third-party components retain their respective licenses.
+
 ## Included
 - Microsoft Entra ID via MSAL authorization-code flow
 - LDAP / Active Directory (LDAP/LDAPS)
