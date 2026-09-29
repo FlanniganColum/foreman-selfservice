@@ -153,7 +153,7 @@ def test_same_linux_admin_cannot_approve_both_stages(app, client, monkeypatch):
         assert db.session.get(DeploymentRequest, request_id).status == "pending_linux_approval"
 
 
-def test_sensitive_linux_override_stores_only_a_new_vault_reference(app, client, monkeypatch):
+def test_sensitive_linux_override_stores_only_new_ciphertext(app, client, monkeypatch):
     chiklet = json.loads(Path("chiklets/deploy-web-application.json").read_text())
     chiklet["id"] = "secret-approval"
     chiklet["form_schema"]["properties"]["password"] = {
@@ -161,12 +161,6 @@ def test_sensitive_linux_override_stores_only_a_new_vault_reference(app, client,
     chiklet["form_schema"]["required"].append("password")
     chiklet["foreman"]["input_map"]["password_ref"] = "password"
     Path(app.config["CHIKLET_DIRECTORY"], "secret-approval.json").write_text(json.dumps(chiklet))
-    app.config.update(VAULT_ADDR="https://vault.example.com", VAULT_TOKEN="test-token")
-    writes = []
-    def vault_post(url, **kwargs):
-        writes.append(kwargs["json"]["data"])
-        return Mock(raise_for_status=Mock())
-    monkeypatch.setattr("app.secrets.requests.post", vault_post)
     monkeypatch.setattr("app.jobs.tasks.execute_request.delay", Mock())
     request_id = submit(client, app, "secret-approval", field__password="initial-secret-value")
     login(client, "approver")
@@ -178,8 +172,7 @@ def test_sensitive_linux_override_stores_only_a_new_vault_reference(app, client,
     with app.app_context():
         item = db.session.get(DeploymentRequest, request_id)
         assert item.submitted_form_data["password"] != item.form_data["password"]
-        assert item.form_data["password"].startswith("vault-kv2://")
+        assert item.form_data["password"].startswith("enc-v1:")
         assert "replacement-secret-value" not in json.dumps(item.form_data)
         assert "replacement-secret-value" not in client.get(f"/requests/{request_id}").get_data(as_text=True)
         assert all("replacement-secret-value" not in json.dumps(a.details) for a in db.session.scalars(db.select(AuditEvent)))
-    assert writes == [{"password": "initial-secret-value"}, {"password": "replacement-secret-value"}]

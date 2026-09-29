@@ -165,13 +165,13 @@
 
       {% set approval_mode = chiklet.get('approval', {}).get('mode', 'full') %}
       {% if approval_mode == 'none' %}
-      <div class="callout">This request starts automatically after submission. Sensitive values are stored in Vault.</div>
+      <div class="callout">This request starts automatically after submission. Sensitive values are protected until sent to Foreman.</div>
       <button class="button primary">Submit and run</button>
       {% elif approval_mode == 'business' %}
-      <div class="callout">The assigned business owner reviews this request. Foreman starts after their approval. Sensitive values are stored in Vault.</div>
+      <div class="callout">The assigned business owner reviews this request. Foreman starts after their approval. Sensitive values are protected until execution.</div>
       <button class="button primary">Submit for business approval</button>
       {% else %}
-      <div class="callout">Submitting records the original values. Your server's technical or business owner reviews first, followed by a Linux administrator who may override editable variables. Foreman starts only after both approvals. Sensitive values are stored in Vault and never shown to approvers.</div>
+      <div class="callout">Submitting records the original values. Your server's technical or business owner reviews first, followed by a Linux administrator who may override editable variables. Foreman starts only after both approvals. Sensitive values are hidden from approvers and sent to Foreman after final approval.</div>
       <button class="button primary">Submit for approval</button>
       {% endif %}
     </form>

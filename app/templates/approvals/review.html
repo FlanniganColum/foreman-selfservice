@@ -16,7 +16,7 @@
     <p class="muted">{{ 'Your approval queues the Foreman job.' if stage == 'business' else 'Your approval sends this request to Linux administrators. It does not start a Foreman job.' }}</p>
   {% else %}
     <h2>Review and override variables</h2>
-    <p>Check a field to replace its value. Unchecked fields keep the submitted value. Sensitive fields are blank and will be stored in Vault if changed.</p>
+    <p>Check a field to replace its value. Unchecked fields keep the submitted value. Sensitive fields are blank and will be sent to Foreman only after approval.</p>
   {% endif %}
 </section>
 {% if stage == 'linux' %}

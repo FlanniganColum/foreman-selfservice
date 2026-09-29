@@ -187,11 +187,13 @@ The left side is the Foreman job-template input name. The right side is the Chik
 
 Every `input_map` source must exist in `form_schema.properties`. Invalid Chiklet definitions are rejected when loaded rather than allowing an unmapped or hidden value to reach Foreman.
 
-With `full` approval, Linux administrators can override editable fields at the second approval stage. The portal validates every override against the Chiklet schema and does not permit overriding `readOnly` fields or the target server. Original values remain in `submitted_form_data` for review. A sensitive override gets a new Vault KV v2 path; approval and audit records retain only the changed field names. Foreman receives the final values after both approval stages. The `business` and `none` modes do not offer overrides.
+With `full` approval, Linux administrators can override editable fields at the second approval stage. The portal validates every override against the Chiklet schema and does not permit overriding `readOnly` fields or the target server. Original non-sensitive values remain in `submitted_form_data` for review. Sensitive fields and overrides are encrypted in the portal database; approval and audit records retain only the changed field names. Foreman receives the final values after both approval stages. The `business` and `none` modes do not offer overrides.
 
 ## Security
 
-Sensitive string fields may be entered in the portal with `x-sensitive: true`. The portal writes their values to HashiCorp Vault KV v2 at `<VAULT_KV_MOUNT>/<VAULT_KV_PREFIX>/<request UUID>` and retains only `vault-kv2://<mount>/<prefix>/<request UUID>#<field>` references in the request history and Foreman inputs. A sensitive field must be editable, have no default or enum, and be listed in `foreman.input_map`. The portal does not read secrets back. The Foreman job template must resolve references with a **separate read-only Vault identity** and use Ansible `no_log: true` on every task that handles secret material. Never print resolved values, enable HTTP request-body logging, or include them in justifications and other ordinary text fields. Foreman output is displayed in the portal, so `no_log` on the job is essential.
+Sensitive string fields may be entered in the portal with `x-sensitive: true`. The portal encrypts them in the request record with a key derived from `SECRET_KEY` while approvals and queueing are pending. It decrypts them in the worker and sends the plaintext value as a Foreman job-template input over HTTPS. The portal never puts plaintext sensitive values in its audit details or rendered request history. A sensitive field must be editable, have no default or enum, and be listed in `foreman.input_map`. Keep `SECRET_KEY` strong, identical across web and worker replicas, and stable until all outstanding requests finish: rotating it invalidates queued encrypted values. Existing requests containing `vault-kv2://` references remain unchanged and still require their prior Foreman lookup configuration.
+
+Foreman now receives the plaintext sensitive job input. Review Foreman's job-input access and retention in your installation. Use Ansible `no_log: true` on every task that handles the value. Never print it, enable request-body logging, or include it in justifications, task names, job descriptions, shell command lines, or ordinary text fields. Foreman output is displayed in the portal, so job output must remain free of secrets.
 
 Example field and mapping:
 
@@ -201,35 +203,20 @@ Example field and mapping:
 ```
 
 ```json
-"input_map": {"ssh_private_key_ref": "ssh_private_key"}
+"input_map": {"ssh_private_key": "ssh_private_key"}
 ```
 
 ### Foreman Ansible job output
 
-Use an Ansible provider job template for Chiklets that resolve Vault references. Keep `no_log: true` on the lookup and **every** task that consumes the resolved value, including failure handlers; leave ordinary progress and status tasks visible. `no_log` hides a protected task's result (including command `stdout` and `stderr`) in Foreman, but does not remove the result from Ansible's in-memory registered variables or suppress output produced outside Ansible. Do not put a secret or its reference into a task name, job description, `debug` message, shell command line, or unprotected `register`/failure handler. Disable Ansible debug mode and avoid diff output for secret-bearing tasks.
+Use an Ansible provider job template for sensitive Chiklets. Keep `no_log: true` on **every** task that consumes the input, including failure handlers; leave ordinary progress and status tasks visible. `no_log` hides a protected task's result (including command `stdout` and `stderr`) in Foreman, but does not remove the result from Ansible's in-memory variables or suppress output produced outside Ansible. Disable Ansible debug mode and avoid diff output for secret-bearing tasks.
 
-For example, with a Foreman input named `ssh_private_key_ref`, pass the reference to the playbook as `ssh_private_key_ref` and adapt the install task to your intended destination:
+For example, with a Foreman input named `ssh_private_key`, pass the input to the playbook as `ssh_private_key` and adapt the install task to your intended destination:
 
 ```yaml
 tasks:
-  - name: Validate the private key reference
-    ansible.builtin.assert:
-      that:
-        - ssh_private_key_ref is match('^vault-kv2://portal/requests/[0-9a-fA-F-]{36}#ssh_private_key$')
-      fail_msg: Invalid secret reference
-    no_log: true
-
-  - name: Resolve the private key from Vault
-    ansible.builtin.set_fact:
-      private_key: >-
-        {{ lookup('community.hashi_vault.vault_kv2_get',
-                  ssh_private_key_ref | regex_replace('^vault-kv2://portal/', '') | regex_replace('#.*$', ''),
-                  engine_mount_point='portal').secret['ssh_private_key'] }}
-    no_log: true
-
   - name: Install the private key with restricted permissions
     ansible.builtin.copy:
-      content: "{{ private_key }}"
+      content: "{{ ssh_private_key }}"
       dest: /etc/myapp/client.key
       owner: root
       group: root
@@ -242,10 +229,6 @@ tasks:
       msg: Private key installed successfully
 ```
 
-The lookup runs on the Ansible controller; configure its read-only Vault identity and trusted Vault CA there, and install `community.hashi_vault` and its `hvac` dependency. Do not pass the Vault read token through a Chiklet input. If the protected step fails, Foreman still records failure status but its detailed result is intentionally hidden. Emit only a fixed, sanitized failure message from a separate task if the operator needs more context. Review other application and remote-host logs independently: Ansible `no_log` cannot redact them.
-
-Set `VAULT_ADDR` to an HTTPS Vault endpoint and `VAULT_TOKEN_FILE` to a mounted file containing the portal token (or `VAULT_TOKEN` for development). Set `VAULT_CA_BUNDLE` for a private CA; `VAULT_KV_MOUNT` and `VAULT_KV_PREFIX` select the KV v2 location. Grant the portal token `create` and `update` on `<mount>/data/<prefix>/*`; grant the Foreman job identity `read` on that path. Keep the Foreman read credential outside the portal and use short-lived identities where possible. Configure retention/deletion in Vault for rejected, completed and orphaned submissions. A failed database commit after a successful Vault write can leave an orphaned secret at the request UUID path. Run the deployment behind HTTPS, redact request bodies at the reverse proxy, WAF, APM and error reporter. An SSH **public** key need not be secret, but a private key must use this path; prefer users supplying public keys when possible.
-
-Vault KV v2 response errors are deliberately reduced to generic messages. The raw secret is never repopulated in a form after validation failure. Existing Chiklets without sensitive fields need no Vault configuration.
+If a protected step fails, Foreman still records failure status but its detailed result is intentionally hidden. Emit only a fixed, sanitized failure message from a separate task if the operator needs more context. Review other application and remote-host logs independently: Ansible `no_log` cannot redact them. Run the deployment behind HTTPS and redact request bodies at the reverse proxy, WAF, APM and error reporter. A raw secret is never repopulated in a form after validation failure. An SSH **public** key need not be secret; prefer users supplying public keys when possible.
 
 `readOnly` is enforced server-side. Editing browser HTML cannot override the value defined by the Chiklet.

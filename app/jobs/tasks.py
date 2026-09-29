@@ -4,6 +4,7 @@ from redis import Redis
 from ..extensions import db
 from ..models import DeploymentRequest, JobExecution, utcnow
 from ..foreman.client import ForemanClient
+from ..catalog.service import sensitive_fields
 from ..audit.service import audit
 
 
@@ -105,7 +106,9 @@ def execute_request(self, request_id):
             db.session.rollback()
             item = db.session.get(DeploymentRequest, request_id)
             execn = item.execution
-            execn.error_message = str(exc)[:4000]
+            safe_error = ("Foreman job submission failed; inspect protected server logs."
+                          if sensitive_fields(item.config_snapshot) else str(exc)[:4000])
+            execn.error_message = safe_error
             if self.request.retries >= self.max_retries:
                 execn.status = "failed"
                 item.status = "failed"
@@ -114,14 +117,15 @@ def execute_request(self, request_id):
                     "FOREMAN_JOB_SUBMIT_FAILED",
                     entity_type="deployment_request",
                     entity_id=item.id,
-                    details={"error": str(exc)[:1000], "attempts": self.request.retries + 1},
+                    details={"error": safe_error[:1000], "attempts": self.request.retries + 1},
                 )
                 db.session.commit()
                 return
             execn.status = "queued"
             item.status = "queued"
             db.session.commit()
-            raise self.retry(exc=exc, countdown=min(60, 5 * (2 ** self.request.retries)))
+            retry_error = RuntimeError(safe_error) if sensitive_fields(item.config_snapshot) else exc
+            raise self.retry(exc=retry_error, countdown=min(60, 5 * (2 ** self.request.retries)))
     finally:
         try:
             lock.release()
