@@ -5,7 +5,7 @@
 - **nginx** — TLS termination, HTTP->HTTPS redirect, security headers and login-rate guard.
 - **web** — Gunicorn + Flask application serving the light UI and authenticated APIs.
 - **worker** — Celery worker responsible for Foreman submissions and asynchronous work.
-- **scheduler** — Celery Beat process that reconciles active Foreman jobs and recovers approved requests that were not submitted after a transient queue failure.
+- **scheduler** — Celery Beat process that reconciles active Foreman jobs, recovers approved requests that were not submitted after a transient queue failure, and schedules Foreman host inventory sync every 15 minutes by default (`FOREMAN_HOST_SYNC_INTERVAL_SECONDS`).
 - **postgres** — system of record for identities, resource entitlements, requests, approvals, execution state and audit events.
 - **redis** — server-side Flask sessions, rate-limit state, Celery broker/result backend and distributed execution lock.
 

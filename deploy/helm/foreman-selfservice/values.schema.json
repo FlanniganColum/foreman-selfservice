@@ -79,6 +79,17 @@
         "enabled": {"type": "boolean"}
       }
     },
+    "config": {
+      "type": "object",
+      "properties": {
+        "foreman": {
+          "type": "object",
+          "properties": {
+            "hostSyncIntervalSeconds": {"type": "integer", "minimum": 60}
+          }
+        }
+      }
+    },
     "ingress": {
       "type": "object",
       "required": ["enabled", "host"],

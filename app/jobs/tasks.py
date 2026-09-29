@@ -145,6 +145,14 @@ def recover_unqueued_requests():
         execute_request.delay(execn.request_id)
 
 
+@shared_task(name="app.jobs.tasks.sync_foreman_hosts")
+def sync_foreman_hosts():
+    from .inventory import sync_hosts
+    count=sync_hosts()
+    current_app.logger.info("Foreman host inventory synchronized: %s hosts", count)
+    return count
+
+
 @shared_task(name="app.jobs.tasks.reconcile_active_jobs")
 def reconcile_active_jobs():
     stmt = db.select(JobExecution).where(JobExecution.status.in_(["queued", "running"]))

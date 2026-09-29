@@ -97,6 +97,11 @@ ConfigMap updates into subPath mounts.
 - `CELERY_BROKER_URL`
 - `CELERY_RESULT_BACKEND`
 
+The singleton scheduler imports and refreshes Foreman hosts every 15 minutes by
+default. Set `config.foreman.hostSyncIntervalSeconds` in values (minimum 60) to
+change the interval; the chart exposes it as
+`FOREMAN_HOST_SYNC_INTERVAL_SECONDS` to the scheduler and worker.
+
 Add authentication and Foreman credentials required by your enabled providers.
 See `../examples/secret.example.yaml`.
 
