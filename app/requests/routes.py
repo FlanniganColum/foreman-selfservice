@@ -17,7 +17,8 @@ from ..catalog.service import (
     bound_username,
 )
 from ..audit.service import audit
-from ..secrets import SecretStoreError, store_secrets
+from ..sensitive import SensitiveDataError, protect_fields
+from flask import current_app
 from ..approvals.routes import owner_ids
 
 bp = Blueprint("requests", __name__, url_prefix="/requests")
@@ -70,11 +71,10 @@ def submit(chiklet_id):
         )
 
     request_id = str(uuid4())
-    secret_names = sensitive_fields(chiklet)
     try:
-        references = store_secrets(request_id, {name: form_data[name] for name in secret_names if name in form_data})
-    except SecretStoreError:
-        flash("Sensitive values could not be stored. Please retry later.", "danger")
+        form_data = protect_fields(form_data, sensitive_fields(chiklet), current_app.config["SECRET_KEY"])
+    except SensitiveDataError:
+        flash("Sensitive values could not be protected. Please contact an administrator.", "danger")
         return (
             render_template("catalog/detail.html", chiklet=chiklet,
                             servers=authorised_servers(current_user, chiklet),
@@ -83,7 +83,6 @@ def submit(chiklet_id):
                             justification=request.form.get("justification", "")),
             503,
         )
-    form_data.update(references)
     item = DeploymentRequest(
         id=request_id,
         request_number=_request_number(),

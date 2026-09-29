@@ -35,7 +35,7 @@
     <div class="params">
       {% for key,value in item.form_data.items() if item.submitted_form_data.get(key) != value %}
       <div><span>{{ key|replace('_',' ') }}</span><code>
-        {% if (item.config_snapshot.form_schema.properties.get(key) or {}).get('x-sensitive') %}Sensitive value replaced; both versions stored in Vault{% else %}
+        {% if (item.config_snapshot.form_schema.properties.get(key) or {}).get('x-sensitive') %}Sensitive value replaced; values hidden{% else %}
           {{ item.submitted_form_data.get(key) }} → {{ value }}
         {% endif %}
       </code></div>

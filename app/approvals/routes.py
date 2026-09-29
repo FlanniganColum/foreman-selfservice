@@ -1,7 +1,5 @@
 from copy import deepcopy
-from uuid import uuid4
-
-from flask import Blueprint, abort, flash, redirect, render_template, request, url_for
+from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, url_for
 from flask_login import current_user, login_required
 from jsonschema import Draft202012Validator
 
@@ -9,7 +7,7 @@ from ..audit.service import audit
 from ..catalog.service import approval_mode, build_form_layout, field_value_from_request, sensitive_fields
 from ..extensions import db
 from ..models import Approval, DeploymentRequest, JobExecution, RequestStatus, Server, utcnow
-from ..secrets import SecretStoreError, store_secrets
+from ..sensitive import SensitiveDataError, protect_fields
 
 bp = Blueprint("approvals", __name__, url_prefix="/approvals")
 
@@ -114,14 +112,11 @@ def approve(request_id):
             for error in errors:
                 flash(error, "danger")
             return redirect(url_for("approvals.review", request_id=item.id)), 303
-        secret_names = sensitive_fields(item.config_snapshot)
-        secret_values = {key: value for key, value in overrides.items() if key in secret_names}
         try:
-            references = store_secrets(str(uuid4()), secret_values)
-        except SecretStoreError:
-            flash("Sensitive overrides could not be stored. Please retry later.", "danger")
+            overrides = protect_fields(overrides, sensitive_fields(item.config_snapshot), current_app.config["SECRET_KEY"])
+        except SensitiveDataError:
+            flash("Sensitive overrides could not be protected. Please contact an administrator.", "danger")
             return redirect(url_for("approvals.review", request_id=item.id)), 303
-        overrides.update(references)
         if overrides:
             item.form_data = {**item.form_data, **overrides}
         item.status = RequestStatus.APPROVED.value
@@ -162,8 +157,8 @@ def _read_overrides(item):
         if list(Draft202012Validator(spec).iter_errors(value)):
             return {}, [f"{key}: invalid override"]
         overrides[key] = value
-    # Validate the full effective form, without examining stored Vault references
-    # against rules for raw secrets (for example a private key PEM pattern).
+    # Validate the full effective form without re-validating the encrypted
+    # sensitive values against rules for raw secrets.
     effective = {**item.form_data, **overrides}
     safe_schema = deepcopy(schema)
     for key in sensitive_fields(item.config_snapshot):

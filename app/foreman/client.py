@@ -1,5 +1,7 @@
 import requests
 from flask import current_app
+from ..catalog.service import sensitive_fields
+from ..sensitive import reveal_fields
 
 
 class ForemanError(RuntimeError):
@@ -83,12 +85,16 @@ class ForemanClient:
             import secrets
 
             return {"id": f"mock-{secrets.token_hex(4)}", "status_label": "queued"}
+        secret_names = sensitive_fields(config_snapshot)
+        if secret_names and (not self.base.startswith("https://") or not self.verify):
+            raise ForemanError("Sensitive job inputs require verified HTTPS to Foreman")
         fcfg = config_snapshot["foreman"]
         template_id = self.resolve_template_id(fcfg)
+        values = reveal_fields(form_data, secret_names, current_app.config["SECRET_KEY"])
         inputs = {}
         for foreman_name, source_name in fcfg.get("input_map", {}).items():
-            if source_name in form_data:
-                inputs[foreman_name] = form_data[source_name]
+            if source_name in values:
+                inputs[foreman_name] = values[source_name]
         description = f"Self-Service {{job_category}} - {target_snapshot['name']}"
         if correlation_id:
             description += f" | {correlation_id}"
