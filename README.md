@@ -67,7 +67,9 @@ docker compose exec web flask --app wsgi:app portal sync-hosts
 ```
 Browse to `https://localhost`. Nginx creates a self-signed development certificate if none is mounted.
 
-Sign in using the bootstrap local account. In **Administration**, assign users to **Demo Servers**, assign each server a technical and/or business owner, and give Linux reviewers the **Linux admin** role. Sample Chiklets then appear for entitled users. Chiklets requiring approval need an eligible server owner other than the requester.
+Sign in using the bootstrap local account. In **Administration**, assign users to **Demo Servers** and give Linux reviewers the **Linux admin** role. In **Servers**, assign each server a technical and/or business owner. Sample Chiklets then appear for entitled users. Chiklets requiring approval need an eligible server owner other than the requester.
+
+Admins can open **Servers** in the navigation to search the Foreman inventory by name, IP address, or Foreman ID. Filter by server group, environment, and enabled status; results are paginated at 25 servers per page. Group and owner assignments, along with the Foreman sync action, are on this page. **Administration** contains users and server group management.
 
 ## Local account password changes
 

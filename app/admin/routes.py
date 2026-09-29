@@ -1,5 +1,7 @@
 from flask import Blueprint,abort,flash,redirect,render_template,request,url_for
 from flask_login import login_required,current_user
+from sqlalchemy import String, cast, func, or_
+from sqlalchemy.orm import joinedload
 from ..extensions import db
 from ..models import User,ServerGroup,Server
 from ..audit.service import audit
@@ -13,7 +15,59 @@ def admin_required(global_only=False):
 @login_required
 def index():
     admin_required()
-    return render_template("admin/index.html",users=db.session.scalars(db.select(User).order_by(User.username)).all(),groups=db.session.scalars(db.select(ServerGroup).order_by(ServerGroup.name)).all(),servers=db.session.scalars(db.select(Server).order_by(Server.name).limit(500)).all())
+    counts=dict(db.session.execute(db.select(Server.group_id,func.count(Server.id)).group_by(Server.group_id)).all())
+    return render_template("admin/index.html",users=db.session.scalars(db.select(User).order_by(User.username)).all(),groups=db.session.scalars(db.select(ServerGroup).order_by(ServerGroup.name)).all(),group_counts=counts)
+
+def _server_filters(source):
+    search=source.get("q","").strip()[:160]
+    group_id=source.get("group_id","").strip()
+    environment=source.get("environment","").strip()[:120]
+    status=source.get("status","").strip()
+    if group_id and (not group_id.isdigit() or len(group_id)>12): abort(400)
+    if status not in {"","enabled","disabled"}: abort(400)
+    return {"q":search,"group_id":group_id,"environment":environment,"status":status}
+
+def _servers_redirect():
+    filters=_server_filters({"q":request.form.get("filter_q",""),
+                             "group_id":request.form.get("filter_group_id",""),
+                             "environment":request.form.get("filter_environment",""),
+                             "status":request.form.get("filter_status","")})
+    page=request.form.get("page","1")
+    if not page.isdigit() or len(page)>9 or int(page)<1: page="1"
+    return redirect(url_for("admin.servers",**filters,page=page))
+
+@bp.get("/servers")
+@login_required
+def servers():
+    admin_required()
+    filters=_server_filters(request.args)
+    search=filters["q"]
+    conditions=[]
+    if search:
+        term=search.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")
+        pattern=f"%{term}%"
+        conditions.append(or_(Server.name.ilike(pattern,escape="\\"),
+                              Server.ip_address.ilike(pattern,escape="\\"),
+                              cast(Server.foreman_host_id,String).ilike(pattern,escape="\\")))
+    if filters["group_id"]: conditions.append(Server.group_id==int(filters["group_id"]))
+    if filters["environment"]: conditions.append(Server.environment==filters["environment"])
+    if filters["status"]: conditions.append(Server.enabled.is_(filters["status"]=="enabled"))
+    page_raw=request.args.get("page","1")
+    page=int(page_raw) if page_raw.isdigit() and len(page_raw)<=9 and int(page_raw)>0 else 1
+    per_page=25
+    total=db.session.scalar(db.select(func.count(Server.id)).where(*conditions))
+    pages=max(1,(total+per_page-1)//per_page)
+    page=min(page,pages)
+    records=db.session.scalars(db.select(Server).options(
+        joinedload(Server.group),joinedload(Server.technical_owner),joinedload(Server.business_owner)
+    ).where(*conditions).order_by(Server.name,Server.id).limit(per_page).offset((page-1)*per_page)).all()
+    groups=db.session.scalars(db.select(ServerGroup).order_by(ServerGroup.name)).all()
+    environments=db.session.scalars(db.select(Server.environment).where(
+        Server.environment.is_not(None),Server.environment!="").distinct().order_by(Server.environment)).all()
+    users=db.session.scalars(db.select(User).where(User.enabled.is_(True)).order_by(User.username)).all()
+    return render_template("admin/servers.html",servers=records,groups=groups,
+                           environments=environments,users=users,total=total,page=page,pages=pages,
+                           **filters)
 
 @bp.post("/groups")
 @login_required
@@ -41,7 +95,7 @@ def update_user_access(user_id):
 def assign_server_group(server_id):
     admin_required(); server=db.session.get(Server,server_id); group=db.session.get(ServerGroup,int(request.form["group_id"]))
     if not server or not group: abort(404)
-    server.group=group; audit("SERVER_GROUP_ASSIGNMENT_CHANGED",entity_type="server",entity_id=server.id,details={"server":server.name,"group":group.slug}); db.session.commit(); flash("Server assignment updated.","success"); return redirect(url_for("admin.index"))
+    server.group=group; audit("SERVER_GROUP_ASSIGNMENT_CHANGED",entity_type="server",entity_id=server.id,details={"server":server.name,"group":group.slug}); db.session.commit(); flash("Server assignment updated.","success"); return _servers_redirect()
 
 @bp.post("/servers/<int:server_id>/owners")
 @login_required
@@ -69,7 +123,7 @@ def assign_server_owners(server_id):
           details={"technical_owner_id": owners["technical"], "business_owner_id": owners["business"]})
     db.session.commit()
     flash("Server owners updated.", "success")
-    return redirect(url_for("admin.index"))
+    return _servers_redirect()
 
 @bp.post("/local-users")
 @login_required
@@ -83,4 +137,4 @@ def create_local_user():
 @login_required
 def sync_foreman():
     admin_required(); from ..jobs.inventory import sync_hosts
-    count=sync_hosts(); flash(f"Synchronized {count} Foreman hosts.","success"); return redirect(url_for("admin.index"))
+    count=sync_hosts(); flash(f"Synchronized {count} Foreman hosts.","success"); return redirect(url_for("admin.servers"))
